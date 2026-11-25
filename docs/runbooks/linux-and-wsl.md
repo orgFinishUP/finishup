@@ -81,7 +81,8 @@ Git configuration on any Git (on Git before 2.32, which ignores `GIT_CONFIG_GLOB
 named the workspace). A system Git older than 2.25 is refused with `git_version_unsupported` and
 the continuation `system_git_upgrade_required`.
 
-A handshake the service fails is named on both sides. The service records it once (`component`
+A handshake the service fails is named on both sides. The service records it once for each hello it fails (twice per
+attempt when the client sends the hello once more, below) (`component`
 `service.daemon`, `operation` `control_handshake`, `reason` `handshake_service_fault` with
 `reason_code` the closed refusal such as `git_version_unsupported`, or the unexpected exception's
 class token and origin with `phase` `handshake`); no path, Git output or stderr is recorded. The
@@ -93,8 +94,20 @@ unreadable, partly readable or absent, it reports `service_handshake_failed`:
 |---|---|
 | CLI (`finishup service status`, any repository-bound command) | `service_unavailable: service_handshake_failed: the local service closed the connection while setting it up …; correlation_id err_…` (holder pid included), exit 20; with an old system Git the line names Git 2.25 and the `system_git_upgrade_required` directive |
 | MCP | `SERVICE_UNAVAILABLE`, `retryable: false`, `safe_details.reason_code: service_handshake_failed`, `safe_details.phase: handshake` or `handshake_git_version` (then also `continuation: system_git_upgrade_required`) |
-| `finishup service diagnostics` | the service's `handshake_service_fault` record with its `reason_code`, and the client's `service_handshake_failed` record |
+| `finishup service diagnostics` | the service's `handshake_service_fault` records with their `reason_code` (two for each failed connection attempt, as below), and the client's `service_handshake_failed` record |
 
+A service of this installation that is stopping, locking or failed is a different case. It
+refuses the connection without reading the hello, and the client reports the retryable
+`service_unavailable: a local service is listening but did not answer …` (MCP `reason_code`
+`accepted_but_unresponsive`), on which `finishup service restart` waits for the singleton. The
+client treats a close as this refusal only while the singleton lock is held (a stale stamp left by
+an exited service is not a live holder), and tells the two cases apart by sending one more hello
+that names no workspace, which only a serving service answers. When it is answered, the client
+sends its own hello once more: a service that has just finished locking serves it, and a failed
+handshake closes it again, so the service records `handshake_service_fault` for both hellos
+(`docs/INTERFACES.md`, control handshake).
+
+For the failed handshake,
 `finishup service restart` does not help (it reports the same failure rather than signalling the
 holder); repair the cause the diagnostics name, typically the system Git. The one exception is a
 holder whose stamp carries no identity key at all (an older FinishUP, or a service whose stamp lost
@@ -300,6 +313,12 @@ AppArmor profile that permits it; a still-blocked host can relax
 `kernel.apparmor_restrict_unprivileged_userns`. The check itself runs with the same wrapper
 prefix plus `--chdir <workspace>`: the whole host filesystem is bound read-write and only the
 network namespace is unshared, mirroring the macOS profile `(allow default) (deny network*)`.
+
+The `bwrap` leader shares the check's process group, so a check that signals its own group
+(`kill 0`) ends the leader too; under Seatbelt the check is the leader, so a crash ends it the same
+way. A check that ends by a signal is recorded `failed` / `nonzero_exit` with the shell's
+`128 + signal` exit status (143 for `SIGTERM`), never as an error. A return code no exit status can
+carry (above 255) is recorded `nonzero_exit` without an exit status.
 
 **`finishup service status` does not report sandbox availability, and is not going to.** Issue #720
 asked for the fact to be named once in setup diagnostics *and* in `finishup service status`; the

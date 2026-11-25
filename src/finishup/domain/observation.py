@@ -9,6 +9,7 @@ import os
 import re
 import shlex
 from collections.abc import Mapping
+from contextvars import ContextVar
 from dataclasses import dataclass
 from enum import Enum
 from types import MappingProxyType, NotImplementedType
@@ -190,7 +191,9 @@ OBSERVATION_COMMAND_COMMITMENT_DOMAIN: Final = b"yoetz/observation-command-commi
 _MAX_OBSERVED_COMMAND_CHARS: Final = 16_384
 _MAX_OBSERVED_ARGV: Final = 1_024
 _SHELL_WRAPPERS: Final = frozenset({"sh", "bash", "zsh", "dash", "ksh"})
-_SHELL_COMMAND_FLAG_RE: Final = re.compile(r"^-[a-z]*c[a-z]*$", re.ASCII)
+# A ``-c`` cluster that runs its argument: the noexec flag ``n`` (``bash -nc X``) reads ``X``
+# without running it, so that form is never unwrapped into ``X`` (#1444).
+_SHELL_COMMAND_FLAG_RE: Final = re.compile(r"^-[a-mo-z]*c[a-mo-z]*$", re.ASCII)
 
 # A summary is an observation-store record.  It is intentionally kept separate
 # from the task-ledger event families: the local writer can account for every
@@ -1183,13 +1186,23 @@ def _collapse_unquoted_blanks(text: str) -> str:
 
     Shell quoting and escapes are tracked so quoted or escaped blanks, quote characters, and line
     breaks (command separators) are kept byte for byte: the result has the same shell meaning.
+    A here-document body is data the shell passes on verbatim, and an ANSI-C ``$'...'`` string
+    has its own escapes (``\\'`` does not close it), so an unquoted ``<<`` (also ``<<-`` and
+    ``<<<``) or ``$'`` keeps the whole text byte for byte apart from its leading blanks; trailing
+    blanks stay too, since they can belong to a body line.
     """
 
     output: list[str] = []
     quote: str | None = None
     escaped = False
     pending_blank = False
-    for char in text:
+    for index, char in enumerate(text):
+        if (
+            quote is None
+            and not escaped
+            and ((char == "<" and text.startswith("<<", index)) or text.startswith("$'", index))
+        ):
+            return text.lstrip(" \t")
         if quote is None and not escaped and char in " \t":
             pending_blank = True
             continue
@@ -1217,8 +1230,9 @@ def normalize_observed_command(value: object) -> str | None:
     including the WSL 2 ``bash -lc`` form) is stripped when its command argument is exact: an argv
     wrapper always, a string wrapper only when it is the canonical single-quoted form, so an
     outer shell cannot have expanded anything first. Quoting, expansions, escapes and line breaks
-    are never rewritten, so two commands with different meaning never share an identity; a missed
-    equivalence only keeps two identities apart. The result exists only to be committed; it is
+    are never rewritten, nor is any blank once an unquoted here-document operator or ANSI-C
+    ``$'...'`` string appears, so two commands with different meaning never share an identity; a
+    missed equivalence only keeps two identities apart. The result exists only to be committed; it is
     never stored, displayed, or sent.
     """
 
@@ -1599,6 +1613,15 @@ class ObservationCursor:
         )
 
 
+# The exact payload object ``observation_envelope_from_json`` has just validated, so the envelope
+# it constructs skips a second identical walk. Context-local, so concurrent decoders never see
+# each other's marker; any other construction validates as before.
+# The default is a private sentinel no caller can pass, never ``None``.
+_PREVALIDATED_STRUCTURAL_PAYLOAD: Final[ContextVar[object]] = ContextVar(
+    "_PREVALIDATED_STRUCTURAL_PAYLOAD", default=object()
+)
+
+
 @dataclass(frozen=True, slots=True, repr=False)
 class ObservationEnvelope:
     session_commitment: str
@@ -1621,7 +1644,10 @@ class ObservationEnvelope:
             raise _invalid()
         if type(self.receipt_time) is not Timestamp:
             raise _invalid("invalid_timestamp")
-        object.__setattr__(self, "structural_payload", _structural_payload(self.structural_payload))
+        if _PREVALIDATED_STRUCTURAL_PAYLOAD.get() is not self.structural_payload:
+            object.__setattr__(
+                self, "structural_payload", _structural_payload(self.structural_payload)
+            )
         object.__setattr__(
             self, "content_object_refs", _content_object_refs(self.content_object_refs)
         )
@@ -2498,17 +2524,28 @@ def observation_envelope_from_json(value: JsonValue) -> ObservationEnvelope:
         observation_source = ObservationSource(cast(str, source["source"]))
     except ValueError as exc:
         raise _invalid("invalid_event_enum") from exc
-    return ObservationEnvelope(
-        session_commitment=cast(str, source["session_commitment"]),
-        event_kind=cast(str, source["event_kind"]),
-        source_identity=cast(str, source["source_identity"]),
-        source=observation_source,
-        cursor=observation_cursor_from_json(source["cursor"]),
-        receipt_time=timestamp_from_string(source["receipt_time"]),
-        structural_payload=_structural_payload(source["structural_payload"]),
-        content_object_refs=_content_object_refs(source["content_object_refs"]),
-        gap_codes=_sorted_unique_gap_codes(source["gap_codes"]),
-    )
+    cursor = observation_cursor_from_json(source["cursor"])
+    receipt_time = timestamp_from_string(source["receipt_time"])
+    structural_payload = _structural_payload(source["structural_payload"])
+    content_object_refs = _content_object_refs(source["content_object_refs"])
+    gap_codes = _sorted_unique_gap_codes(source["gap_codes"])
+    # ``_structural_payload`` returns its validated object unchanged and is deterministic, so
+    # validating that same object again in ``__post_init__`` cannot change the outcome.
+    marker = _PREVALIDATED_STRUCTURAL_PAYLOAD.set(structural_payload)
+    try:
+        return ObservationEnvelope(
+            session_commitment=cast(str, source["session_commitment"]),
+            event_kind=cast(str, source["event_kind"]),
+            source_identity=cast(str, source["source_identity"]),
+            source=observation_source,
+            cursor=cursor,
+            receipt_time=receipt_time,
+            structural_payload=structural_payload,
+            content_object_refs=content_object_refs,
+            gap_codes=gap_codes,
+        )
+    finally:
+        _PREVALIDATED_STRUCTURAL_PAYLOAD.reset(marker)
 
 
 def advice_item_to_json(value: AdviceItem) -> JsonObject:

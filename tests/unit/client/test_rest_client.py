@@ -178,6 +178,25 @@ async def test_a_redirect_is_never_followed_and_a_large_answer_is_refused(
     assert server.seen == ["/redirect", "/big"]
 
 
+@pytest.mark.parametrize("declared", ["\u00b2".encode(), "\u0661".encode(), b"-1", b"1e3"])
+async def test_a_content_length_that_is_not_ascii_digits_is_incompatible(declared: bytes) -> None:
+    import httpx
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(200, headers=[(b"content-length", declared)], content=b"{}")
+
+    transport = RestTransport(
+        "https://lab.example", key=None, transport=httpx.MockTransport(handler)
+    )
+    try:
+        with pytest.raises(RestUnavailable) as refused:
+            await transport.request("GET", "/v1/server", limit=1_024)
+    finally:
+        await transport.aclose()
+    assert refused.value.reason == "remote_incompatible"
+
+
 async def test_proxy_variables_are_ignored(
     server: _Server, monkeypatch: pytest.MonkeyPatch
 ) -> None:

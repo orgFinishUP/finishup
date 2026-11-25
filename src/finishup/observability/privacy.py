@@ -107,6 +107,8 @@ _ORIGIN = re.compile(
 )
 _VERSION = re.compile(r"^[0-9A-Za-z][0-9A-Za-z._/+:-]{0,127}$", re.ASCII)
 _HASH = re.compile(r"^(?:hmac-)?sha256:[0-9a-f]{64}$", re.ASCII)
+# The only line ends Python's tokenizer counts; ast line numbers are relative to these.
+_PYTHON_LINE_END = re.compile(rb"\r\n|\r|\n")
 
 
 # A private key is matched from its BEGIN line through the END line of the same label (#1248,
@@ -354,8 +356,8 @@ _LOG_FIELDS: Final = frozenset(
         "codex_event_delta_bytes",
         "codex_event_intermediate_count",
         "codex_event_intermediate_bytes",
-        # #1172: per-exchange prompt-cache telemetry (provider-reported token counts and one
-        # closed miss label, never content).
+        # #1172: per-exchange prompt-cache telemetry (provider-reported token counts, one
+        # closed miss label and one closed usage state, never content).
         "reviewer_exchange_index",
         "reviewer_model_requests",
         "reviewer_input_tokens",
@@ -365,6 +367,7 @@ _LOG_FIELDS: Final = frozenset(
         "reviewer_prefix_tokens",
         "reviewer_prefix_cached_tokens",
         "reviewer_cache_miss",
+        "reviewer_usage_state",
         "timestamp",
         "level",
         "component",
@@ -532,10 +535,13 @@ _TOKEN_FIELDS: Final = frozenset(
         "semantic_conclusion",
         "control_method",
         "client_kind",
-        # #1172: the closed per-exchange prompt-cache miss label.
+        # #1172: the closed per-exchange prompt-cache miss label and usage state.
         "reviewer_cache_miss",
+        "reviewer_usage_state",
     }
 )
+# #1172: why an ``exchange_cache`` record carries no counts; no other value is admitted.
+_REVIEWER_USAGE_STATES: Final = frozenset({"unreported", "refused"})
 _VERSION_FIELDS: Final = frozenset(
     {
         "schema_version",
@@ -770,12 +776,11 @@ def _python_attribute_assignment_spans(data: bytes) -> tuple[tuple[int, int], ..
         tree = ast.parse(source, mode="exec")
     except (RecursionError, UnicodeDecodeError, SyntaxError, ValueError):
         return ()
-    lines = source.splitlines(keepends=True)
-    line_offsets: list[int] = []
-    offset = 0
-    for line in lines:
-        line_offsets.append(offset)
-        offset += len(line.encode("utf-8"))
+    # ast reports 1-based line numbers counted the way Python's tokenizer ends lines (``\r\n``,
+    # ``\r``, ``\n``) and UTF-8 byte columns. ``str.splitlines`` also splits on form feed,
+    # vertical tab, U+2028 and other separators, which would shift every later span onto
+    # earlier bytes, so line starts are computed from the encoded bytes instead.
+    line_offsets = [0, *(match.end() for match in _PYTHON_LINE_END.finditer(data))]
 
     def node_span(node: ast.AST) -> tuple[int, int] | None:
         lineno = getattr(node, "lineno", None)
@@ -823,7 +828,13 @@ def _python_attribute_assignment_spans(data: bytes) -> tuple[tuple[int, int], ..
         ):
             continue
         span = node_span(node)
-        if span is not None:
+        # Defense in depth: keep a span only when its bytes are the assignment itself, so a
+        # misaligned offset can only withdraw an exemption, never grant one to other bytes.
+        if (
+            span is not None
+            and data[span[0] : span[1]].startswith(b"token")
+            and data[span[0] : span[1]].endswith(b".token")
+        ):
             spans.append(span)
     return tuple(sorted(set(spans)))
 
@@ -2022,6 +2033,10 @@ def redact_diagnostic_value(name: str, value: object) -> JsonValue:
             return value if type(value) is str and _HASH.fullmatch(value) else "unavailable"
         if name == "origin":
             return value if type(value) is str and _ORIGIN.fullmatch(value) else "unavailable"
+        if name == "reviewer_usage_state":
+            return (
+                value if type(value) is str and value in _REVIEWER_USAGE_STATES else "unavailable"
+            )
         if name in _TOKEN_FIELDS:
             return _bounded_token(value, _TOKEN)
         if name in _VERSION_FIELDS:

@@ -111,6 +111,33 @@ def test_parse_rejects_lone_surrogates_and_overflow() -> None:
         _assert_reason(exc_info, reason)
 
 
+@pytest.mark.parametrize(
+    "literal",
+    [
+        b"1" * 17,
+        b"-" + b"1" * 17,
+        b"1" * 5000,
+        b"-" + b"1" * 5000,
+    ],
+    ids=["17-digits", "negative-17-digits", "5000-digits", "negative-5000-digits"],
+)
+def test_parse_rejects_integers_longer_than_any_safe_integer(literal: bytes) -> None:
+    # 5000 digits is past the interpreter's integer-string conversion limit.
+    with pytest.raises(ProtocolValueError) as exc_info:
+        strict_json_parse(b'{"a":' + literal + b"}")
+    _assert_reason(exc_info, "integer_out_of_safe_range")
+    with pytest.raises(ProtocolValueError) as exc_info:
+        strict_json_parse(literal, validate=False)
+    _assert_reason(exc_info, "integer_out_of_safe_range")
+
+
+def test_parse_keeps_the_sixteen_digit_safe_bounds() -> None:
+    assert strict_json_parse(b"[9007199254740991,-9007199254740991]") == [
+        9007199254740991,
+        -9007199254740991,
+    ]
+
+
 def test_maximum_container_depth_is_exact() -> None:
     accepted_bytes = b"[" * MAX_JSON_DEPTH + b"0" + b"]" * MAX_JSON_DEPTH
     rejected_bytes = b"[" * (MAX_JSON_DEPTH + 1) + b"0" + b"]" * (MAX_JSON_DEPTH + 1)

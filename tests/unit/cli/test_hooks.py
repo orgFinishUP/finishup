@@ -15,7 +15,7 @@ from typer.testing import CliRunner
 from finishup.adapters.integrations.codex_lifecycle import (
     load_mapping,
     mapping_from_start_ids,
-    mapping_path,
+    pending_mapping_paths,
     queue_mapping_store,
     scoped_child_session_id,
     store_mapping,
@@ -545,7 +545,7 @@ def test_start_bind_reconciles_crashed_applying_before_store(tmp_path: Path) -> 
         last_frontier="3:sha256:" + "c" * 64,
     )
     queue_mapping_store(old, _state=tmp_path)
-    pending = mapping_path(session, _state=tmp_path).with_name(f".{session}.pending.json")
+    (pending,) = pending_mapping_paths(session, _state=tmp_path)
     applying = pending.with_name(pending.name + ".applying")
     pending.replace(applying)
 
@@ -585,7 +585,7 @@ def test_session_start_clear_reconciles_crashed_applying_before_clear(tmp_path: 
     )
     store_mapping(existing, _state=tmp_path)
     queue_mapping_store(existing, _state=tmp_path)
-    pending = mapping_path(session, _state=tmp_path).with_name(f".{session}.pending.json")
+    (pending,) = pending_mapping_paths(session, _state=tmp_path)
     applying = pending.with_name(pending.name + ".applying")
     pending.replace(applying)
     assert (
@@ -701,9 +701,7 @@ def test_start_bind_owner_coalesces_loser_queue_before_reconcile(tmp_path: Path)
     assert not errors
     assert outcomes == {"loser": "start_bind_deferred", "owner": "bound"}
     assert load_mapping(session, _state=tmp_path) == owner_mapping
-    pending = mapping_path(session, _state=tmp_path).with_name(f".{session}.pending.json")
-    assert not pending.exists()
-    assert not pending.with_name(pending.name + ".applying").exists()
+    assert pending_mapping_paths(session, _state=tmp_path) == ()
 
 
 def test_clear_owner_coalesces_loser_store_before_reconcile(tmp_path: Path) -> None:
@@ -798,9 +796,7 @@ def test_clear_owner_coalesces_loser_store_before_reconcile(tmp_path: Path) -> N
     assert not errors
     assert outcomes == {"loser": "start_bind_deferred"}
     assert load_mapping(session, _state=tmp_path) is None
-    pending = mapping_path(session, _state=tmp_path).with_name(f".{session}.pending.json")
-    assert not pending.exists()
-    assert not pending.with_name(pending.name + ".applying").exists()
+    assert pending_mapping_paths(session, _state=tmp_path) == ()
 
 
 def test_post_tool_use_malformed_json_no_traceback(tmp_path: Path) -> None:
@@ -1209,8 +1205,7 @@ def test_session_start_defers_service_while_pending_mapping_lock_is_busy(tmp_pat
         )
         assert connects == []
         assert load_mapping(session, _state=tmp_path) is None
-        pending = mapping_path(session, _state=tmp_path).with_name(f".{session}.pending.json")
-        assert pending.exists()
+        assert pending_mapping_paths(session, _state=tmp_path)
 
 
 def test_session_start_startup_is_noop(tmp_path: Path) -> None:

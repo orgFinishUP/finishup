@@ -28,7 +28,7 @@ from finishup.kernel.task_facts import (
     REQUESTED_OUTPUT_UNCHANGED_GAP,
     requested_output_facts,
 )
-from finishup.ports.change_capture import CheckWorkspaceSource
+from finishup.ports.change_capture import CheckWorkspaceSource, TaskChangeBase
 
 _OBLIGATION = obligation_id("obl_00000000-0000-4000-8000-000000000001")
 
@@ -485,3 +485,75 @@ def test_a_line_break_file_name_keeps_requested_output_facts_live(tmp_path: Path
     assert states[(_OBLIGATION, 1)].exists is False
     absent, _markers = requested_output_facts(projection, states, blocked=())
     assert absent == ((_OBLIGATION, 1),)
+
+
+def _created(adapter: GitChangeCaptureAdapter, repository: Path, base: TaskChangeBase) -> set[str]:
+    capture = adapter.capture_metadata(os.fspath(repository), base)
+    return {
+        entry.path for entry in capture.entries if entry.untracked or entry.status.startswith("A")
+    }
+
+
+@pytest.mark.parametrize("directory", ["plain", "résultats", "run:1", 'say "hi"'])
+def test_ignore_file_names_the_rule_file_as_the_capture_does(
+    tmp_path: Path, directory: str
+) -> None:
+    repository = _repository(tmp_path)
+    adapter = GitChangeCaptureAdapter()
+    base = adapter.read_task_base(os.fspath(repository))
+    folder = repository / directory
+    folder.mkdir()
+    (folder / ".gitignore").write_text("out.csv\n", encoding="utf-8")
+    (folder / "out.csv").write_text("a,b\n", encoding="utf-8")
+
+    (probe,) = adapter.probe_requested_paths(os.fspath(repository), (f"{directory}/out.csv",))
+
+    assert (probe.ignored, probe.ignore_source, probe.ignore_file) == (
+        True,
+        "repository_file",
+        f"{directory}/.gitignore",
+    )
+    assert probe.ignore_file in _created(adapter, repository, base)
+
+
+@pytest.mark.parametrize("directory", ["résultats", "run:1"])
+def test_a_task_created_rule_file_in_any_directory_is_the_tasks_ignore(
+    tmp_path: Path, directory: str
+) -> None:
+    repository = _repository(tmp_path)
+    adapter = GitChangeCaptureAdapter()
+    base = adapter.read_task_base(os.fspath(repository))
+    folder = repository / directory
+    folder.mkdir()
+    (folder / ".gitignore").write_text("out.csv\n", encoding="utf-8")
+    (folder / "out.csv").write_text("a,b\n", encoding="utf-8")
+    capture = adapter.capture_metadata(os.fspath(repository), base)
+    projection = _projection(f"{directory}/out.csv")
+
+    states = asyncio.run(
+        requested_output_states(
+            projection=projection,
+            capture=capture,
+            source=CheckWorkspaceSource(os.fspath(repository), "hmac-sha256:" + "0" * 64),
+            port=adapter,
+            request_id="req_00000000-0000-4000-8000-000000000003",
+        )
+    )
+    _, markers = requested_output_facts(projection, states, blocked=())
+
+    assert {code for code, _ in markers} == {REQUESTED_OUTPUT_GIT_IGNORED_GAP}
+
+
+@pytest.mark.parametrize("name", ["re:po", "dépôt"])
+def test_info_exclude_is_recognized_under_any_root_name(tmp_path: Path, name: str) -> None:
+    repository = _repository(tmp_path).rename(tmp_path / name)
+    (repository / "output").mkdir()
+    (repository / "output" / "flag.txt").write_text("flag\n", encoding="utf-8")
+    exclude = repository / ".git" / "info" / "exclude"
+    exclude.write_text(exclude.read_text(encoding="utf-8") + "/output/\n", encoding="utf-8")
+
+    (probe,) = GitChangeCaptureAdapter().probe_requested_paths(
+        os.fspath(repository), ("output/flag.txt",)
+    )
+
+    assert (probe.ignored, probe.ignore_source, probe.ignore_file) == (True, "info_exclude", None)

@@ -33,6 +33,7 @@ from finishup.domain.events import (
     ResponseRecordedPayload,
 )
 from finishup.domain.findings import (
+    FINDING_KIND_TRAITS,
     CheckVerdict,
     Finding,
     FindingKind,
@@ -48,7 +49,7 @@ from finishup.domain.receipts import (
     SEMANTIC_REVIEW_NOT_CONFIGURED_GAP,
     SEMANTIC_REVIEW_NOT_REQUESTED_GAP,
 )
-from finishup.domain.values import EventId, object_id, timestamp_from_string
+from finishup.domain.values import EventId, SubjectStateRef, object_id, timestamp_from_string
 from finishup.kernel.deterministic_checks import (
     CaseGap,
     DeterministicAssessment,
@@ -291,6 +292,134 @@ def test_collapse_is_scoped_to_the_response_it_matched() -> None:
         "weak_or_stale_response",
     ]
     assert {item.candidate.subject_refs for item in assessments} == {(evt(99),), (evt(98),)}
+
+
+def _shared_subject_case(*, second_stale: bool) -> DeterministicCase:
+    """Two local findings on one subject, each rejected without evidence."""
+
+    return make_case(
+        findings={
+            fnd(1): record(_responded_finding(1, evt(99)), 2),
+            fnd(2): record(
+                replace(
+                    _responded_finding(2, evt(99)),
+                    kind=FindingKind.CLAIM_WITHOUT_ADMISSIBLE_EVIDENCE,
+                    priority=FINDING_KIND_TRAITS[FindingKind.CLAIM_WITHOUT_ADMISSIBLE_EVIDENCE][0],
+                ),
+                3,
+            ),
+        },
+        responses={
+            fnd(1): record(_hollow_response(1, ResponseDisposition.REJECTED), 4),
+            fnd(2): record(_hollow_response(2, ResponseDisposition.WAIVED, stale=second_stale), 5),
+        },
+        extra_refs=(evt(99),),
+    )
+
+
+def test_hollow_rejections_sharing_a_subject_keep_both_packs_running() -> None:
+    """Responses to two findings on one subject collapse together and neither pack fails."""
+
+    assessments, executions = run_deterministic_policies(
+        _shared_subject_case(second_stale=False),
+        CheckScope((), ()),
+        ("research-evidence/0.2.0", "work-integrity/0.3.0"),
+    )
+
+    assert [(row.outcome, row.reason) for row in executions] == [
+        ("run", "completed"),
+        ("run", "completed"),
+    ]
+    assert tuple(item.candidate.kind for item in assessments) == (
+        FindingKind.QUESTIONABLE_FINDING_REJECTION,
+    )
+
+
+def test_a_stale_response_on_a_shared_subject_keeps_the_work_finding() -> None:
+    """research-evidence covers only the current response; the stale one must not be absorbed."""
+
+    assessments, executions = run_deterministic_policies(
+        _shared_subject_case(second_stale=True),
+        CheckScope((), ()),
+        ("research-evidence/0.2.0", "work-integrity/0.3.0"),
+    )
+
+    assert all((row.outcome, row.reason) == ("run", "completed") for row in executions)
+    assert sorted(item.candidate.kind.value for item in assessments) == [
+        "questionable_finding_rejection",
+        "weak_or_stale_response",
+    ]
+
+
+def test_rejecting_both_research_findings_on_one_claim_keeps_them_reported() -> None:
+    """A claim citing evidence from another tree draws two research findings on one subject.
+
+    Rejecting both without evidence must leave both packs completed and the claim's own findings
+    on the receipt, rather than failing the packs and dropping every local finding.
+    """
+
+    evidence = replace(
+        _legacy_evidence(),
+        subject_state=SubjectStateRef(tree_digest="sha256:" + "3" * 64),
+    )
+    claim = ClaimRecordedPayload(
+        claim_id=clm(1),
+        claim_kind=ClaimKind.MATERIAL,
+        statement="New state",
+        supporting_refs=(evd(1),),
+        subject_state=SubjectStateRef(tree_digest="sha256:" + "4" * 64),
+    )
+    evidence_rows = {evd(1): evidence_record(evidence, 1)}
+    claims = {clm(1): record(claim, 2)}
+    first, _ = run_deterministic_policies(
+        make_case(evidence=evidence_rows, claims=claims),
+        CheckScope((), ()),
+        ("research-evidence/0.2.0",),
+    )
+    subjects = {item.candidate.kind: item.candidate.subject_refs for item in first}
+    shared = subjects[FindingKind.EVIDENCE_DOES_NOT_SUPPORT_CLAIM]
+    assert subjects[FindingKind.DIFF_DOES_NOT_MATCH_ACCOUNT] == shared
+
+    def _local(number: int, kind: FindingKind) -> Finding:
+        return replace(
+            _responded_finding(number, evt(99)),
+            kind=kind,
+            priority=FINDING_KIND_TRAITS[kind][0],
+            subject_refs=shared,
+            policy_id="research-evidence",
+            policy_version="0.2.0",
+        )
+
+    case = make_case(
+        evidence=evidence_rows,
+        claims=claims,
+        findings={
+            fnd(1): record(_local(1, FindingKind.EVIDENCE_DOES_NOT_SUPPORT_CLAIM), 3),
+            fnd(2): record(_local(2, FindingKind.DIFF_DOES_NOT_MATCH_ACCOUNT), 4),
+        },
+        responses={
+            fnd(1): record(_hollow_response(1, ResponseDisposition.REJECTED), 5),
+            fnd(2): record(_hollow_response(2, ResponseDisposition.REJECTED), 6),
+        },
+    )
+
+    assessments, executions = run_deterministic_policies(
+        case,
+        CheckScope((), ()),
+        ("research-evidence/0.2.0", "work-integrity/0.3.0"),
+    )
+
+    assert [(row.outcome, row.reason) for row in executions] == [
+        ("run", "completed"),
+        ("run", "completed"),
+    ]
+    kinds = {item.candidate.kind for item in assessments}
+    assert {
+        FindingKind.EVIDENCE_DOES_NOT_SUPPORT_CLAIM,
+        FindingKind.DIFF_DOES_NOT_MATCH_ACCOUNT,
+        FindingKind.QUESTIONABLE_FINDING_REJECTION,
+    } <= kinds
+    assert FindingKind.WEAK_OR_STALE_RESPONSE not in kinds
 
 
 def test_direct_scope_excludes_pack_without_selected_root() -> None:

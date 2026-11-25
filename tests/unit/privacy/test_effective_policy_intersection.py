@@ -67,6 +67,15 @@ def _database() -> apsw.Connection:
     return db
 
 
+def _authority_database() -> apsw.Connection:
+    """A catalog carrying the installation-authority tables ``repository_authority`` reads."""
+
+    db = apsw.Connection(":memory:")
+    for version in ("0001", "0002", "0003"):
+        db.execute(Path(f"migrations/catalog/{version}.sql").read_text(encoding="utf-8"))
+    return db
+
+
 def _disabled(channel: EgressChannel) -> ChannelPolicy:
     return ChannelPolicy(
         channel,
@@ -463,3 +472,88 @@ def test_effective_generation_tracks_the_most_specific_row(store_kind: str) -> N
 
     composed_generation, workspace_generation = asyncio.run(run())
     assert composed_generation == workspace_generation
+
+
+def _evidence_guarded(policy: PrivacyPolicy) -> PrivacyPolicy:
+    return replace(policy, require_current_provider_data_use_evidence=True)
+
+
+def _other_binding(policy: PrivacyPolicy) -> PrivacyPolicy:
+    llm = replace(
+        _llm(policy),
+        provider_binding=ProviderBinding(
+            "fireworks",
+            "accounts/fireworks/models/other-model",
+            "fireworks-responses",
+            "1.0.0",
+            "external",
+        ),
+    )
+    return replace(
+        policy,
+        channel_policies=tuple(
+            llm if channel.channel is EgressChannel.LLM_INFERENCE else channel
+            for channel in policy.channel_policies
+        ),
+    )
+
+
+@pytest.mark.parametrize("lower", ["local_only", "other_binding"])
+def test_meet_drops_the_evidence_guard_when_no_inference_destination_survives(
+    lower: str,
+) -> None:
+    machine = _evidence_guarded(
+        _minimal_external(scope=_machine_scope(), policy_id=_POLICY_M, digest=_DIGEST_M)
+    )
+    external = _minimal_external(scope=_workspace_scope(), policy_id=_POLICY_W, digest=_DIGEST_W)
+    # A local-only row turns the network off; a different binding leaves no common destination.
+    repository = (
+        _local_only(scope=_workspace_scope(), policy_id=_POLICY_W, digest=_DIGEST_W)
+        if lower == "local_only"
+        else _other_binding(external)
+    )
+
+    for composed in (machine.meet(repository), repository.meet(machine)):
+        assert composed.profile is PrivacyProfile.LOCAL_ONLY
+        assert _llm(composed).provider_binding is None
+        assert _llm_authorized(composed) is False
+        assert composed.require_current_provider_data_use_evidence is False
+    assert machine.meet(repository).policy_digest == repository.meet(machine).policy_digest
+
+
+def test_meet_keeps_the_evidence_guard_while_the_binding_survives() -> None:
+    machine = _evidence_guarded(
+        _minimal_external(scope=_machine_scope(), policy_id=_POLICY_M, digest=_DIGEST_M)
+    )
+    repository = _minimal_external(scope=_workspace_scope(), policy_id=_POLICY_W, digest=_DIGEST_W)
+    composed = machine.meet(repository)
+    assert _llm(composed).provider_binding is not None
+    assert composed.require_current_provider_data_use_evidence is True
+
+
+@pytest.mark.parametrize("store_kind", ["catalog", "memory"])
+def test_private_repository_under_an_evidence_guarded_ceiling_stays_readable(
+    store_kind: str,
+) -> None:
+    machine = _evidence_guarded(
+        _minimal_external(scope=_machine_scope(), policy_id=_POLICY_M, digest=_DIGEST_M)
+    )
+    repository = _local_only(scope=_workspace_scope(), policy_id=_POLICY_W, digest=_DIGEST_W)
+
+    async def run() -> tuple[PrivacyPolicy, PrivacyPolicy]:
+        if store_kind == "catalog":
+            store: CatalogPrivacyPolicyStore | MemoryPrivacyPolicyStore = CatalogPrivacyPolicyStore(
+                _authority_database(), _Clock()
+            )
+        else:
+            store = MemoryPrivacyPolicyStore(MemoryPrivacyCatalogState(), _Clock())
+        await store.seed_if_absent(machine)
+        await store.seed_if_absent(repository)
+        effective = await store.effective_policy(_task_scope())
+        authority = await store.repository_authority(_workspace_scope())
+        return effective.policy, authority.effective.policy
+
+    for policy in asyncio.run(run()):
+        assert policy.profile is PrivacyProfile.LOCAL_ONLY
+        assert _llm_authorized(policy) is False
+        assert policy.require_current_provider_data_use_evidence is False

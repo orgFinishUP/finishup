@@ -243,7 +243,7 @@ def _unknown(
     for name, value in source.items():
         if name in known:
             continue
-        if type(name) is not str or not _MEMBER.match(name):
+        if type(name) is not str or not _MEMBER.fullmatch(name):
             raise EnvelopeError("envelope_member_invalid")
         try:
             text = canonical_encode(value).decode("utf-8")
@@ -256,7 +256,7 @@ def _unknown(
 def _token(value: JsonValue, *, nullable: bool = False) -> str | None:
     if value is None and nullable:
         return None
-    if type(value) is not str or not _TOKEN.match(value):
+    if type(value) is not str or not _TOKEN.fullmatch(value):
         raise EnvelopeError("envelope_field_invalid")
     return value
 
@@ -316,7 +316,7 @@ def _endpoint(
         raise EnvelopeError("envelope_field_invalid")
     identity_type = _required_token(_member(source, "identity_type"))
     identity = _member(source, "identity")
-    if identity is not None and (type(identity) is not str or not _IDENTITY.match(identity)):
+    if identity is not None and (type(identity) is not str or not _IDENTITY.fullmatch(identity)):
         raise EnvelopeError("envelope_field_invalid")
     if identity_type not in IDENTITY_TYPES:
         paths.add("endpoint.identity_type")

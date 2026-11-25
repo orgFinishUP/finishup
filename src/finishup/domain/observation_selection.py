@@ -25,9 +25,11 @@ from finishup.domain.command_segments import (
     command_separators,
     command_structure,
     opens_files_without_a_command,
+    segment_reads_arguments_as_data,
     segment_words_without_redirections,
     strip_one_wrapper,
     strip_wrappers,
+    top_level_segments,
 )
 from finishup.domain.shell_writes import patch_command_words, shell_write_paths
 from finishup.protocol.canonical import JsonValue as CanonicalJsonValue
@@ -131,7 +133,9 @@ _FAILURE_STATUSES: Final = {
 }
 _PARTIAL_STATUSES: Final = frozenset({"partial", "partially_completed"})
 _SHELL_WRAPPERS: Final = frozenset({"sh", "bash", "zsh", "dash", "ksh"})
-_SHELL_COMMAND_FLAG_RE: Final = re.compile(r"^-[a-z]*c[a-z]*$", re.ASCII)
+# A ``-c`` cluster that runs its argument: the noexec flag ``n`` (``bash -nc X``) reads ``X``
+# without running it, so that form is never unwrapped into ``X`` (#1444).
+_SHELL_COMMAND_FLAG_RE: Final = re.compile(r"^-[a-mo-z]*c[a-mo-z]*$", re.ASCII)
 
 # ``rg --pre`` and related forms invoke an arbitrary preprocessor.  Git's
 # ext-diff/textconv/output paths likewise cross the read-only boundary.
@@ -734,6 +738,11 @@ def _classify_resolved_argv(argv: list[str]) -> RunnerClass | None:
         and all(not argument.startswith("-") for argument in argv[3:])
     ):
         return "exploration"
+    if command in _SHELL_WRAPPERS and _shell_noexec(argv):
+        # The shell reads its script file or ``-c`` text and runs none of it (``bash -n
+        # run_tests.sh``, ``sh -cn verify.sh``), so the call is no run of that script, and no word
+        # of it names a verifier either (``bash -n build.sh``, ``bash -nc 'mypy src'``) (#1444).
+        return "other"
     if command in _SHELL_WRAPPERS and len(argv) >= 3 and _SHELL_COMMAND_FLAG_RE.fullmatch(argv[1]):
         return command_runner_class({"command": argv[2]})
     wrapped = _run_wrapper_target(command, argv)
@@ -887,6 +896,47 @@ _TEST_SCRIPT_NAME_RE: Final = re.compile(
     r"|^(?:test[-_][a-z0-9_.-]+|[a-z0-9_.-]+[-_]tests?)\.[a-z0-9]+$",
     re.IGNORECASE | re.ASCII,
 )
+
+
+# One word of a shell's own short options (``-x``, ``-lc``, ``+e``).
+_SHELL_OPTION_CLUSTER_RE: Final = re.compile(r"^[-+][A-Za-z]+$", re.ASCII)
+
+
+def _shell_noexec(argv: list[str]) -> bool:
+    """Whether a shell's own options tell it to read its script without running it.
+
+    The options are the words before the script file or the ``-c`` text; a shell keeps reading
+    them after ``-c`` (``bash -c -n X`` runs nothing), and any later word is the script's own
+    argument (``bash run.sh -n``, ``bash -c X -n``). Noexec is ``n`` in a short cluster (``-n``,
+    ``-nc``, ``-xn``), ``-o noexec`` (``-eo noexec``) and zsh's spellings of the name (``-o
+    NO_EXEC``, ``--no-exec``), which bash and dash refuse without running anything. Such a shell
+    exits zero for any well-formed text, so its exit status says nothing about the script.
+    """
+
+    index = 1
+    while index < len(argv):
+        word = argv[index]
+        index += 1
+        if len(word) > 2 and word.startswith("--"):
+            if _shell_option_name(word) == "noexec":
+                return True
+            continue
+        if _SHELL_OPTION_CLUSTER_RE.fullmatch(word) is None:
+            return False
+        if word[0] == "-" and "n" in word:
+            return True
+        for letter in word[1:]:
+            if letter in "oO":
+                # ``-o NAME`` and bash's ``-O NAME`` take the next word, from any cluster.
+                named = argv[index] if index < len(argv) else ""
+                if word[0] == "-" and letter == "o" and _shell_option_name(named) == "noexec":
+                    return True
+                index += 1
+    return False
+
+
+def _shell_option_name(word: str) -> str:
+    return word.replace("-", "").replace("_", "").casefold()
 
 
 def _script_operand(command: str, argv: list[str]) -> str | None:
@@ -1236,6 +1286,51 @@ def _compound_runner_class(raw: str, own_launchers: frozenset[str] = frozenset()
 # Text that runs a command the splitter does not see as a segment: command and process
 # substitution. Refused anywhere in the command, a here-document body included.
 _HIDDEN_EXECUTION_MARKERS: Final = ("$(", "`", "<(", ">(")
+# Separators after which the outer exit status no longer reports every command's result. ``&&``
+# and a subshell's parentheses keep it; ``|&`` and ``;;`` are reported as ``|`` and ``;``.
+_NESTED_STATUS_MASKING_SEPARATORS: Final = frozenset({";", "||", "|", "&", "\n"})
+# Programs that run a quoted argument as shell text. A quoted separator in their arguments can be
+# a real one that the quote-aware parse never descends into (``eval 'a; b'``, ``sudo bash -c
+# 'a; b'``, ``bash -c 'a; b' arg0``, a wrapper nested past the walk's depth), so when one is
+# present the raw text decides, with only fd redirections (``2>&1``, ``&> log``) set aside. The
+# list cannot name every such program (``fish``, ``$SHELL``, ``script -c``, ``git rebase -x``),
+# so it only adds to ``_quoted_separators_are_data``: a word from it anywhere in the command
+# keeps the raw-text decision even when a data program holds the quoted separator.
+_SHELL_TEXT_RUNNERS: Final = _SHELL_WRAPPERS | frozenset({"eval", "su", "runuser", "ssh", "watch"})
+_FD_REDIRECTION_RE: Final = re.compile(r"[0-9]*[<>]&(?:[0-9]+-?|-)?|&>>?", re.ASCII)
+
+
+def _separator_characters(text: str) -> int:
+    """How many ``;``, ``|``, ``&`` and line breaks *text* holds beside ``&&`` and fd redirections."""
+
+    unredirected = _FD_REDIRECTION_RE.sub("", text).replace("&&", "")
+    return sum(unredirected.count(marker) for marker in ("\n", ";", "|", "&"))
+
+
+def _quoted_separators_are_data(raw: str) -> bool:
+    """Whether every separator character left in *raw* is data to the program that receives it.
+
+    Asked once the splitter found no masking separator, so each remaining ``;``, ``|``, ``&`` or
+    line break is quoted, escaped or in a comment. A program may still run its quoted argument as
+    shell text, and no list names every program that does, so the answer is ``True`` only when
+    each simple command holding such a character is a plain call of a program known to only read
+    its arguments (``segment_reads_arguments_as_data``: ``echo``, ``grep``, ``git commit`` ...).
+    It is ``False`` as well when the splitter's reading cannot be relied on: ANSI-C quoting
+    (``$'\\''``) escapes a quote the splitter takes as closing, and a character the commands do
+    not account for was dropped as a comment, which bash may not read as one (``${x:- #}``). A
+    line continuation is no separator and is not counted. A program is taken by its name: a
+    function, alias or ``PATH`` that an earlier call or an earlier segment set is not tracked.
+    """
+
+    split = top_level_segments(raw)
+    if split is None or "$'" in raw:
+        return False
+    accounted = 0
+    for segment in split[0]:
+        if _separator_characters(segment) and not segment_reads_arguments_as_data(segment):
+            return False
+        accounted += _separator_characters(segment.replace("\\\n", ""))
+    return accounted == _separator_characters(raw.replace("\\\n", ""))
 
 
 def _compound_is_read_only(
@@ -1276,20 +1371,38 @@ def compound_verification_gap_required(payload: Mapping[str, CanonicalJsonValue]
 
     The outer exit code remains authoritative for the shell process. A plain ``&&`` chain with a
     zero exit proves each command in that chain returned zero, so it needs no extra gap. ``;``,
-    ``||``, pipelines, background jobs, command substitution, and malformed shell text can hide a
-    nested result; those shapes receive the bounded ``compound_outcome_unavailable`` coverage gap.
-    Output text is never inspected.
+    ``||``, pipelines, background jobs, line breaks, command or process substitution, and
+    malformed shell text can hide a nested result; those shapes receive the bounded
+    ``compound_outcome_unavailable`` coverage gap. Separators are read quote-aware, at every
+    wrapper depth: a redirection (``2>&1``, ``>&2``, ``&>``, ``&>> log``) leaves one exit status
+    and is no masking shape, and neither is a separator inside quotes when the command holding it
+    runs a program known to only read its arguments (``git commit -m 'a; b'``, ``grep 'a|b' f``,
+    #1447). Any other program may run its quoted argument as shell text (``eval 'a; b'``, ``sudo
+    bash -c 'a; b'``, ``$SHELL -c``, ``fish -c``, ``script -c``, ``git rebase -x``, ``find -exec
+    ... \\;``), so there a quoted or escaped separator keeps the gap
+    (``_quoted_separators_are_data``), as it does when a shell or ``eval`` is named anywhere in
+    the command (``_SHELL_TEXT_RUNNERS``). Output text is never inspected.
     """
 
     raw = _raw_command(payload)
     if raw is None or not _is_shell_compound(raw):
         return False
     try:
-        shlex.split(raw, posix=True)
+        words = shlex.split(raw, posix=True)
     except ValueError:
         return True
-    without_and = raw.replace("&&", "")
-    return any(marker in without_and for marker in ("\n", "\r", ";", "|", "&", "`", "$("))
+    separators = command_separators(raw)
+    if separators is None or separators & _NESTED_STATUS_MASKING_SEPARATORS:
+        return True
+    if _separator_characters(raw) and (
+        any(word.rsplit("/", 1)[-1] in _SHELL_TEXT_RUNNERS for word in words)
+        or not _quoted_separators_are_data(raw)
+    ):
+        return True
+    # Substitution runs a command whose status the outer one never reports; double quotes do not
+    # stop it, so the raw text is searched (conservative for a single-quoted marker). A bare
+    # carriage return, which the splitter keeps inside a word, stays a gap as it always was.
+    return "\r" in raw or any(marker in raw for marker in _HIDDEN_EXECUTION_MARKERS)
 
 
 def _routine_facts(payload: Mapping[str, CanonicalJsonValue]) -> _RoutineFacts:

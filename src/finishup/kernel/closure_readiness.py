@@ -113,7 +113,10 @@ from finishup.kernel.task_facts import (
     requested_output_unchanged_candidates,
     task_fact_signals,
 )
-from finishup.protocol.models import SemanticReason, SemanticStatus
+from finishup.protocol.model_values import (
+    SemanticReason,
+    SemanticStatus,
+)
 
 # L5's D7 predicate (#984, D7a), looked up by name so this module works on a build without it:
 # absent, nothing is reported as disputed. Tests monkeypatch this attribute.
@@ -1028,9 +1031,16 @@ def _downgraded_from_resolved(
 
 
 def closure_readiness_facts(
-    state: ProjectionState, records: tuple[LedgerRecord, ...]
+    state: ProjectionState,
+    records: tuple[LedgerRecord, ...],
+    *,
+    signals: TaskFactSignals | None = None,
 ) -> ClosureReadinessFacts:
-    """Derive the readiness facts for exactly this projection and its record prefix."""
+    """Derive the readiness facts for exactly this projection and its record prefix.
+
+    ``signals`` lets a caller that already derived ``task_fact_signals(state, records)`` for
+    this same projection and prefix pass it in instead of deriving it a second time.
+    """
 
     if type(state) is not ProjectionState or type(records) is not tuple:
         raise ValueError("closure_readiness_facts_invalid")
@@ -1107,7 +1117,8 @@ def closure_readiness_facts(
         _closing_review_facts(state, records, limitations)
     )
     applicability, standing = _check_applicability(state, records)
-    signals = task_fact_signals(state, records)
+    if signals is None:
+        signals = task_fact_signals(state, records)
     disclosures = disclosure_declarations(state)
     risky_pairs = acceptance_risk(
         state,

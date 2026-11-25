@@ -178,6 +178,32 @@ class _DrainClient(Protocol):
 type DrainConnector = Callable[[ControlClientKind], Awaitable[_DrainClient]]
 
 
+class _RevocationFenceClient(Protocol):
+    async def observation_revoke(
+        self, request: JsonObject, *, deadline_ms: int | None = None
+    ) -> JsonObject: ...
+
+    async def close(self) -> None: ...
+
+
+type RevocationFenceConnector = Callable[[ControlClientKind], Awaitable[_RevocationFenceClient]]
+
+_REVOCATION_FENCE_DEADLINE_MS: Final = 10_000
+_REVOCATION_FENCE_PENDING_CONTINUATION: Final = (
+    "Observation is revoked and stays stopped, but FinishUP could not reach its service to "
+    "finish withdrawing consent. Run `finishup observe revoke` again once the service can "
+    "start; until then a new grant for this workspace is refused."
+)
+# The same pending fence on a root that is, or may be, a server elsewhere: no retry from this
+# computer finishes it, so the text names none.
+_REVOCATION_FENCE_NO_LOCAL_SERVICE_CONTINUATION: Final = (
+    "Observation is revoked and stays stopped. The server in use is elsewhere (reached over SSH "
+    "or HTTPS), or its record cannot be read, and FinishUP cannot finish withdrawing consent for "
+    "such a server, so nothing was sent to it. While that is so, a new grant for this workspace "
+    "is refused, and running `finishup observe revoke` again does not finish it."
+)
+
+
 _WORKSPACE_LOCATOR_INVALID: Final = "workspace_locator_invalid"
 _UNSAFE_OBSERVATION_STORAGE_ERRNOS: Final = frozenset(
     {
@@ -378,6 +404,23 @@ def _typed_failure(
     return exit_code_for(code)
 
 
+def _public_operation_failure(
+    operation: str, error: PublicOperationError, *, json_output: bool
+) -> int:
+    """Report a typed public refusal with its own code, message, exit code and retryable flag."""
+
+    return _typed_failure(
+        operation,
+        error.code.value.lower(),
+        code=error.code,
+        message=error.message,
+        retryable=error.retryable,
+        json_output=json_output,
+        recovery_lines=render_error_recovery_lines(error.safe_details),
+        recovery_json=error_recovery_json(error.safe_details),
+    )
+
+
 def _bounded_operation(operation: str) -> Callable[[Callable[_P, int]], Callable[_P, int]]:
     """Map the closed pre-store failures of an observe verb to typed public outcomes.
 
@@ -444,16 +487,7 @@ def _bounded_operation(operation: str) -> Callable[[Callable[_P, int]], Callable
                     ),
                 )
             except PublicOperationError as error:
-                return _typed_failure(
-                    operation,
-                    error.code.value.lower(),
-                    code=error.code,
-                    message=error.message,
-                    retryable=error.retryable,
-                    json_output=json_output,
-                    recovery_lines=render_error_recovery_lines(error.safe_details),
-                    recovery_json=error_recovery_json(error.safe_details),
-                )
+                return _public_operation_failure(operation, error, json_output=json_output)
             except BrokenPipeError:
                 # A closed output consumer is not an observation-store failure.
                 raise
@@ -1948,10 +1982,20 @@ def reclaim_observation(*, workspace: str, json_output: bool, _state: Path | Non
 
 
 @_bounded_operation("grant")
-def grant_observation(*, workspace: str, _state: Path | None = None) -> int:
+def grant_observation(
+    *,
+    workspace: str,
+    _state: Path | None = None,
+    _connect: RevocationFenceConnector | None = None,
+) -> int:
     store = LocalObservationStore(_state=_state)
     root = _resolve_workspace(workspace)
     commitment = store.workspace_commitment(str(root))
+    # A revoke whose project fence never finished (no service then) blocks every new grant;
+    # finish it first, so withdrawing consent is not a one-way door on a root a service of this
+    # computer serves (#1479). A fence still pending after this is refused below as before; on a
+    # root that is, or may be, a server elsewhere nothing can finish it and none is asked.
+    _finish_revocation_fence(store, commitment, _connect, _state)
     # A repeated grant keeps already-approved native content arms and the unchanged
     # content fence; only content-disable or revoke removes an arm (issue #835).
     grant = store.grant_consent(commitment)
@@ -2480,12 +2524,116 @@ def resume_observation(*, workspace: str, _state: Path | None = None) -> int:
     return 0
 
 
+def _revocation_fence_connector(
+    connect: RevocationFenceConnector | None, state: Path | None
+) -> RevocationFenceConnector | None:
+    """Return the service route that finishes a revoke, or None when none serves this store.
+
+    The service owns the project catalog a revoke must fence, and it serves the default state
+    root only; a store under any other root has no service of its own to ask. A root that is, or
+    may be, a server elsewhere has none either (``_fence_root_may_be_remote``), so nothing is
+    dialled for it.
+    """
+
+    if connect is not None:
+        return connect
+    if state is not None or _fence_root_may_be_remote(connect, state):
+        return None
+    return cast(RevocationFenceConnector, connect_service_on_demand)
+
+
+def _fence_root_may_be_remote(connect: RevocationFenceConnector | None, state: Path | None) -> bool:
+    """Whether the store's root is, or may be, a server elsewhere: SSH, HTTPS or a port (ADR-051).
+
+    The fence token of such a root is in this computer's store for that server. The server keeps
+    its own stores and clears a token only there, and no service of this computer runs in such a
+    root, so no request can finish the fence: asking the server would spend a remote connection,
+    and up to the request's deadline, on an answer that changes nothing here. An injected
+    connector or an explicit state root is used as given.
+    """
+
+    if connect is not None or state is not None:
+        return False
+    from finishup.client.targets import active_root_may_be_remote
+
+    return active_root_may_be_remote()
+
+
+async def _finish_revocation_fence_async(
+    commitment: str, connect: RevocationFenceConnector
+) -> None:
+    from finishup.domain.observation import observation_revoke_command_to_json
+    from finishup.protocol.ids import IdKind, new_id
+
+    client = await connect(ControlClientKind.CLI)
+    try:
+        await client.observation_revoke(
+            JsonObject(
+                {
+                    "schema_version": "1.0.0",
+                    "request_id": new_id(IdKind.REQUEST),
+                    "command": observation_revoke_command_to_json(
+                        ObservationRevokeCommand(commitment, retain_evidence=True)
+                    ),
+                }
+            ),
+            deadline_ms=_REVOCATION_FENCE_DEADLINE_MS,
+        )
+    finally:
+        await client.close()
+
+
+def _finish_revocation_fence(
+    store: LocalObservationStore,
+    commitment: str,
+    connect: RevocationFenceConnector | None,
+    state: Path | None,
+) -> bool:
+    """Finish a pending consent-revocation fence through the service; True once none is pending.
+
+    A local revoke stops capture at once and records a durable fence token. Only the service's
+    observation coordinator can fence the project generations the revoked consent fed and then
+    clear that token; until it does, a new grant is refused. The service's revoke is idempotent
+    for an already-revoked consent, so asking it again replays the pending fence (#1479). The
+    route is resolved only while a fence is pending, so a command that finds none reads nothing
+    more for it.
+    """
+
+    if store.pending_consent_revocation(commitment) is None:
+        return True
+    route = _revocation_fence_connector(connect, state)
+    if route is None:
+        return False
+    import anyio
+
+    async def run() -> None:
+        await _finish_revocation_fence_async(commitment, route)
+
+    # The pending token, re-read below, is the authority on whether the fence finished; a
+    # service that could not be reached or refused the request leaves it in place.
+    with contextlib.suppress(Exception):
+        anyio.run(run)
+    return store.pending_consent_revocation(commitment) is None
+
+
 @_bounded_operation("revoke")
-def revoke_observation(*, workspace: str, _state: Path | None = None) -> int:
+def revoke_observation(
+    *,
+    workspace: str,
+    _state: Path | None = None,
+    _connect: RevocationFenceConnector | None = None,
+) -> int:
     store = LocalObservationStore(_state=_state)
     commitment = store.workspace_commitment(str(_resolve_workspace(workspace)))
     status = store.revoke(ObservationRevokeCommand(commitment, retain_evidence=True))
     typer.echo(f"observation_revoked:{status.lifecycle.value}:evidence_retained")
+    if not _finish_revocation_fence(store, commitment, _connect, _state):
+        if _fence_root_may_be_remote(_connect, _state):
+            typer.echo("observation_revoke_fence_pending:no_local_service", err=True)
+            typer.echo(_REVOCATION_FENCE_NO_LOCAL_SERVICE_CONTINUATION, err=True)
+        else:
+            typer.echo("observation_revoke_fence_pending:service_unavailable", err=True)
+            typer.echo(_REVOCATION_FENCE_PENDING_CONTINUATION, err=True)
     return 0
 
 
@@ -2514,7 +2662,14 @@ _CHECK_POLICY_CONTINUATION: Final = (
 )
 
 
-def _check_policy_failure(operation: str, error: BaseException) -> int:
+def _check_policy_failure(
+    operation: str, error: BaseException, *, json_output: bool = False
+) -> int:
+    if isinstance(error, PublicOperationError):
+        # The store's own typed refusal: a workspace state file or key it will not read
+        # (`STORAGE_CORRUPT`, `STORAGE_UNSAFE`). Report it as `observe status` does, with its code,
+        # message, exit code and retryable flag, so the owner learns what to repair or retry.
+        return _public_operation_failure(f"checks_{operation}", error, json_output=json_output)
     if isinstance(error, ObservationCheckPolicyAbsent):
         reason = "policy_not_configured"
     elif isinstance(error, ObservationCheckPolicyAmbiguous):
@@ -2540,7 +2695,11 @@ def observe_checks_preview(
     try:
         _root, commitment, store, policy = _check_policy_context(workspace, _state=_state)
     except Exception as error:
-        return _check_policy_failure("preview", error)
+        return _check_policy_failure("preview", error, json_output=json_output)
+    try:
+        trusted = store.policy_digest_is_trusted(commitment, policy.raw_digest)
+    except Exception as error:
+        return _check_policy_failure("preview", error, json_output=json_output)
     checks = tuple(
         {
             "id": item.approval_id,
@@ -2555,7 +2714,7 @@ def observe_checks_preview(
         {
             "workspace_commitment": commitment,
             "policy_digest": policy.raw_digest,
-            "trusted": store.policy_digest_is_trusted(commitment, policy.raw_digest),
+            "trusted": trusted,
             "checks": checks,
         },
         json_output=json_output,
@@ -2576,7 +2735,10 @@ def observe_checks_trust(
     if policy_digest != policy.raw_digest:
         typer.echo("observation_checks_trust_failed:digest_mismatch", err=True)
         return 20
-    store.trust_policy_digest(commitment, policy.raw_digest)
+    try:
+        store.trust_policy_digest(commitment, policy.raw_digest)
+    except Exception as error:
+        return _check_policy_failure("trust", error)
     typer.echo(f"observation_checks_trusted:{policy.raw_digest}")
     return 0
 
@@ -2589,13 +2751,13 @@ def observe_checks_status(
         store = LocalObservationStore(_state=_state)
         commitment = store.workspace_commitment(str(root))
     except Exception as error:
-        return _check_policy_failure("status", error)
+        return _check_policy_failure("status", error, json_output=json_output)
     try:
         policy, _raw = load_observation_check_policy(root)
     except ObservationCheckPolicyAbsent:
         policy = None
     except Exception as error:
-        return _check_policy_failure("status", error)
+        return _check_policy_failure("status", error, json_output=json_output)
     if policy is None:
         # Absence is the ordinary state of an opt-in feature: report it, do not fail.
         _emit(
@@ -2611,7 +2773,10 @@ def observe_checks_status(
             json_output=json_output,
         )
         return 0
-    trusted = store.policy_digest_is_trusted(commitment, policy.raw_digest)
+    try:
+        trusted = store.policy_digest_is_trusted(commitment, policy.raw_digest)
+    except Exception as error:
+        return _check_policy_failure("status", error, json_output=json_output)
     _emit(
         {
             "workspace_commitment": commitment,
@@ -2639,10 +2804,16 @@ def observe_checks_status(
 
 
 def observe_checks_revoke(*, workspace: str | None, _state: Path | None = None) -> int:
-    root = _resolve_workspace(workspace)
-    store = LocalObservationStore(_state=_state)
-    commitment = store.workspace_commitment(str(root))
-    store.revoke_policy_trust(commitment)
+    # Revoke is the way out of a trusted policy: an unresolvable workspace or a store fault is the
+    # same bounded refusal its sibling verbs give (`unavailable`, or the store's own typed code),
+    # never an untyped crash (#428).
+    try:
+        root = _resolve_workspace(workspace)
+        store = LocalObservationStore(_state=_state)
+        commitment = store.workspace_commitment(str(root))
+        store.revoke_policy_trust(commitment)
+    except Exception as error:
+        return _check_policy_failure("revoke", error)
     typer.echo("observation_checks_revoked")
     return 0
 
@@ -2653,7 +2824,7 @@ def observe_checks_run(
     try:
         root, commitment, store, policy = _check_policy_context(workspace, _state=_state)
     except Exception as error:
-        return _check_policy_failure("run", error)
+        return _check_policy_failure("run", error, json_output=json_output)
     try:
         if not store.policy_digest_is_trusted(commitment, policy.raw_digest):
             store.note_coverage_gap(commitment, ObservationGapCode.POLICY_UNTRUSTED.value)
@@ -2712,6 +2883,10 @@ def observe_checks_run(
             json_output=json_output,
         )
         return 0 if all(item["status"] == "passed" for item in results) else 20
+    except PublicOperationError as error:
+        # Only the store's trust read and gap notes raise this here; workspace, capture and
+        # runner faults stay `unavailable` below.
+        return _check_policy_failure("run", error, json_output=json_output)
     except Exception:
         typer.echo("observation_checks_run_failed:unavailable", err=True)
         return 20

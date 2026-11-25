@@ -10,7 +10,7 @@ import re
 import sys
 from collections.abc import Mapping
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import pytest
 from typer.testing import CliRunner
@@ -32,6 +32,7 @@ from finishup.domain.observation import (
     ObservationStatusQuery,
     observation_ingest_result_to_json,
 )
+from finishup.domain.values import JsonObject
 from finishup.protocol.ids import IdKind, new_id
 
 _ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
@@ -60,6 +61,306 @@ def test_grant_pause_resume_revoke_roundtrip(tmp_path: Path, capsys: object) -> 
     assert "consent: revoked" in status_out
     assert ObservationLifecycle.STOPPED.value in status_out
     assert workspace not in status_out
+
+
+class _CoordinatorBackedService:
+    """A service connection whose observation_revoke runs the real control handler and
+    observation coordinator over the CLI's own store, with a recording project fence."""
+
+    def __init__(self, state: Path) -> None:
+        from finishup.adapters.integrations.codex_lifecycle import load_mapping
+        from finishup.application.observation_control import build_observation_support_handlers
+        from finishup.application.observation_coordinator import ObservationCoordinator
+        from finishup.application.projects import SourceConsentRevocationPlan
+        from finishup.ports.control import ControlMethod
+
+        self.fenced: list[str] = []
+        self.connections = 0
+
+        async def planner(
+            task_ids: tuple[str, ...], workspace_commitment: str, token: str
+        ) -> SourceConsentRevocationPlan:
+            del task_ids, workspace_commitment
+            return SourceConsentRevocationPlan(token, ())
+
+        async def applier(plan: SourceConsentRevocationPlan) -> SourceConsentRevocationPlan:
+            self.fenced.append(plan.revocation_token)
+            return plan
+
+        class _Ids:
+            def new(self, kind: IdKind) -> str:
+                return new_id(kind)
+
+        coordinator = ObservationCoordinator(
+            runtime=object(),  # type: ignore[arg-type]
+            local=LocalObservationStore(_state=state),
+            clock=object(),  # type: ignore[arg-type]
+            ids=_Ids(),  # type: ignore[arg-type]
+            state_root=state,
+            mapping_loader=load_mapping,
+            consent_invalidation_planner=planner,  # type: ignore[arg-type]
+            consent_invalidation_applier=applier,  # type: ignore[arg-type]
+        )
+        self._revoke = build_observation_support_handlers(coordinator)[
+            ControlMethod.OBSERVATION_REVOKE
+        ]
+
+    async def connect(self, kind: object) -> _CoordinatorBackedService:
+        del kind
+        self.connections += 1
+        return self
+
+    async def observation_revoke(
+        self, request: JsonObject, *, deadline_ms: int | None = None
+    ) -> JsonObject:
+        del deadline_ms
+        return await self._revoke(request)
+
+    async def close(self) -> None:
+        return None
+
+
+async def _no_service(kind: object) -> object:
+    del kind
+    raise ConnectionRefusedError("service_unavailable")
+
+
+def test_revoke_finishes_its_fence_through_the_service_so_a_later_grant_succeeds(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    state = tmp_path / "state"
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    service = _CoordinatorBackedService(state)
+    connect = service.connect
+
+    assert observe_cli.grant_observation(workspace=str(workspace), _state=state) == 0
+    assert (
+        observe_cli.revoke_observation(workspace=str(workspace), _state=state, _connect=connect)
+        == 0
+    )
+    revoked = capsys.readouterr()
+    assert "observation_revoked:" in revoked.out
+    assert "fence_pending" not in revoked.err
+
+    store = LocalObservationStore(_state=state)
+    commitment = store.workspace_commitment(str(workspace.resolve()))
+    assert store.pending_consent_revocation(commitment) is None
+    assert len(service.fenced) == 1
+    consent = store.consent_for(commitment)
+    assert consent is not None and not consent.active
+
+    code = observe_cli.grant_observation(workspace=str(workspace), _state=state, _connect=connect)
+    captured = capsys.readouterr()
+    assert code == 0, captured.err
+    assert f"observation_consent_granted:{commitment}" in captured.out
+    regranted = LocalObservationStore(_state=state).consent_for(commitment)
+    assert regranted is not None and regranted.active
+    # The grant found no pending fence and asked the service nothing more.
+    assert service.connections == 1
+
+
+def test_revoke_without_a_service_names_the_pending_fence_and_a_later_grant_finishes_it(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    state = tmp_path / "state"
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+
+    assert observe_cli.grant_observation(workspace=str(workspace), _state=state) == 0
+    assert (
+        observe_cli.revoke_observation(
+            workspace=str(workspace),
+            _state=state,
+            _connect=_no_service,  # type: ignore[arg-type]
+        )
+        == 0
+    )
+    revoked = capsys.readouterr()
+    assert "observation_revoked:" in revoked.out
+    assert "observation_revoke_fence_pending:service_unavailable" in revoked.err
+    assert "finishup observe revoke" in revoked.err
+    store = LocalObservationStore(_state=state)
+    commitment = store.workspace_commitment(str(workspace.resolve()))
+    assert store.pending_consent_revocation(commitment) is not None
+    assert str(workspace) not in revoked.out + revoked.err
+
+    # With no service the project fence cannot finish, so the grant stays refused.
+    refused = observe_cli.grant_observation(
+        workspace=str(workspace),
+        _state=state,
+        _connect=_no_service,  # type: ignore[arg-type]
+    )
+    assert refused == 10
+    assert "still being fenced" in capsys.readouterr().err
+
+    # Once the service is reachable, the grant finishes the leftover fence and re-consents.
+    service = _CoordinatorBackedService(state)
+    code = observe_cli.grant_observation(
+        workspace=str(workspace), _state=state, _connect=service.connect
+    )
+    captured = capsys.readouterr()
+    assert code == 0, captured.err
+    assert len(service.fenced) == 1
+    assert store.pending_consent_revocation(commitment) is None
+    consent = store.consent_for(commitment)
+    assert consent is not None and consent.active
+
+
+class _ServiceDial:
+    """Stands in for the on-demand service connector and counts every attempt to use it."""
+
+    def __init__(self) -> None:
+        self.attempts = 0
+
+    async def __call__(self, kind: object, **kwargs: object) -> object:
+        del kind, kwargs
+        self.attempts += 1
+        raise ConnectionRefusedError("service_unavailable")
+
+
+def _select_server_elsewhere(kind: str) -> Path:
+    """Record and select one server elsewhere; return its root on this computer."""
+
+    from finishup.client import targets
+
+    with targets.registry_lock():
+        if kind == "https":
+            record, root = targets.new_remote_target(
+                "lab", "https", base_url="https://finishup.example"
+            )
+        else:
+            record, root = targets.new_remote_target(
+                "lab", "ssh", user="owner", host="lab.example", port=22
+            )
+    targets.write_selection(record)
+    return root
+
+
+@pytest.mark.parametrize("root_kind", ["ssh", "https", "unreadable_record"])
+def test_revoke_and_grant_on_a_root_that_may_be_remote_dial_nothing_and_promise_no_retry(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    root_kind: str,
+) -> None:
+    """The fence token of such a root is in this computer's store, which no service serves.
+
+    A server elsewhere keeps its own stores and cannot clear it, so asking that server (as the
+    fence finisher of issue #1479 first did for every root) only spent a remote connection and
+    its deadline, and the "run revoke again once the service can start" text named a retry that
+    never succeeds.
+    """
+
+    from builders.server_targets import ambient_home
+    from finishup.client import targets
+    from finishup.config.paths import reset_selection_memo, state_dir
+
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    with ambient_home(monkeypatch):
+        root = _select_server_elsewhere("https" if root_kind == "https" else "ssh")
+        if root_kind == "unreadable_record":
+            # A record other accounts could have written is not trusted: it may name any kind.
+            (root / "target.json").chmod(0o644)
+            reset_selection_memo()
+        assert targets.active_root_may_be_remote() is True
+        assert state_dir() == root / "state"
+        dial = _ServiceDial()
+        monkeypatch.setattr(observe_cli, "connect_service_on_demand", dial)
+
+        assert observe_cli.grant_observation(workspace=str(workspace)) == 0
+        capsys.readouterr()
+        for _attempt in range(2):
+            assert observe_cli.revoke_observation(workspace=str(workspace)) == 0
+            revoked = capsys.readouterr()
+            assert "observation_revoked:" in revoked.out
+            assert dial.attempts == 0
+            assert "observation_revoke_fence_pending:no_local_service" in revoked.err
+            # Nothing here can be retried into success, so nothing says to retry.
+            assert "service_unavailable" not in revoked.err
+            assert "once the service can start" not in revoked.err
+            assert "does not finish it" in revoked.err
+            assert "a new grant for this workspace is refused" in revoked.err
+            assert str(workspace) not in revoked.out + revoked.err
+
+        store = LocalObservationStore()
+        commitment = store.workspace_commitment(str(workspace.resolve()))
+        assert store.pending_consent_revocation(commitment) is not None
+
+        # The grant is refused exactly as before the fence finisher existed.
+        assert observe_cli.grant_observation(workspace=str(workspace)) == 10
+        assert "still being fenced" in capsys.readouterr().err
+        assert dial.attempts == 0
+
+
+def test_a_grant_with_no_pending_fence_does_not_read_the_server_record(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from builders.server_targets import ambient_home
+    from finishup.client import targets
+
+    def unexpected() -> bool:
+        raise AssertionError("the route is resolved only while a fence is pending")
+
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    with ambient_home(monkeypatch):
+        monkeypatch.setattr(targets, "active_root_may_be_remote", unexpected)
+        assert observe_cli.grant_observation(workspace=str(workspace)) == 0
+        assert observe_cli.grant_observation(workspace=str(workspace)) == 0
+
+
+def test_revoke_help_does_not_promise_a_new_grant_with_a_server_elsewhere() -> None:
+    result = CliRunner().invoke(app, ["observe", "revoke", "--help"])
+
+    assert result.exit_code == 0
+    output = _terminal_compact(result.stdout)
+    assert "Grantagaintoresume." in output
+    assert "Withaserverelsewhereinuse(reachedoverSSHorHTTPS)" in output
+    assert "alatergrantforthesameworkspaceisrefused" in output
+
+
+@pytest.mark.parametrize("root_kind", ["everyday", "named_local", "isolated"])
+def test_revoke_on_a_local_root_still_finishes_its_fence_through_the_service(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    root_kind: str,
+) -> None:
+    from builders.server_targets import ambient_home
+    from finishup.client import targets
+    from finishup.config.paths import ISOLATED_ROOT_ENV_NAMES, reset_selection_memo, state_dir
+
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    with ambient_home(monkeypatch) as home:
+        if root_kind == "named_local":
+            with targets.registry_lock():
+                record, _root = targets.new_local_target("work")
+            targets.write_selection(record)
+        elif root_kind == "isolated":
+            isolated = home / "isolated"
+            isolated.mkdir(mode=0o700)
+            monkeypatch.setenv(ISOLATED_ROOT_ENV_NAMES[0], str(isolated))
+            reset_selection_memo()
+        assert targets.active_root_may_be_remote() is False
+        service = _CoordinatorBackedService(state_dir())
+        monkeypatch.setattr(observe_cli, "connect_service_on_demand", service.connect)
+
+        assert observe_cli.grant_observation(workspace=str(workspace)) == 0
+        assert observe_cli.revoke_observation(workspace=str(workspace)) == 0
+        revoked = capsys.readouterr()
+        assert "observation_revoked:" in revoked.out
+        assert "fence_pending" not in revoked.err
+        assert (service.connections, len(service.fenced)) == (1, 1)
+
+        code = observe_cli.grant_observation(workspace=str(workspace))
+        captured = capsys.readouterr()
+        assert code == 0, captured.err
+        store = LocalObservationStore()
+        consent = store.consent_for(store.workspace_commitment(str(workspace.resolve())))
+        assert consent is not None and consent.active
 
 
 def test_git_subdirectory_consent_and_hook_share_one_canonical_workspace(
@@ -1235,6 +1536,46 @@ def test_other_observe_verbs_share_the_typed_workspace_refusal(
         assert captured.err.startswith(f"observation_{verb}_failed:workspace_unresolvable: ")
 
 
+@pytest.mark.parametrize("workspace", ["", "/nonexistent-finishup-workspace/SECRET-NAME"])
+def test_checks_revoke_refuses_an_unresolvable_workspace_typed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    workspace: str,
+) -> None:
+    """`observe checks revoke` shares its siblings' bounded refusal, not `internal_error` (#428)."""
+    import finishup.adapters.integrations.observation_local as local
+    from finishup.cli.app import main
+
+    monkeypatch.setattr(local, "state_dir", lambda: tmp_path)
+    for verb in ("preview", "revoke"):
+        monkeypatch.setattr(
+            sys, "argv", ["finishup", "observe", "checks", verb, "--workspace", workspace]
+        )
+        with pytest.raises(SystemExit) as exit_:
+            main()
+        captured = capsys.readouterr()
+        assert exit_.value.code == 20, captured.err
+        assert captured.err == f"observation_checks_{verb}_failed:unavailable\n"
+        assert "SECRET-NAME" not in captured.out + captured.err
+
+
+def test_checks_revoke_bounds_a_store_fault(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from finishup.config.paths import PathSafetyError
+
+    def unsafe_store(*args: object, **kwargs: object) -> object:
+        raise PathSafetyError("path_contains_symlink")
+
+    monkeypatch.setattr(observe_cli, "LocalObservationStore", unsafe_store)
+    code = observe_cli.observe_checks_revoke(workspace=str(tmp_path), _state=tmp_path)
+    captured = capsys.readouterr()
+    assert code == 20
+    assert captured.out == ""
+    assert captured.err == "observation_checks_revoke_failed:unavailable\n"
+
+
 def _enqueue_shell_rows(root: Path, session_id: str, ordinals: tuple[int, ...]) -> None:
     for ordinal in ordinals:
         handle_observe(
@@ -1582,6 +1923,90 @@ def test_explicit_recovery_persists_profile_and_rotation_frontier(
             commitment, session, source_generation=cursor.source_generation
         )
         assert set(tools) == ({"first"} if version == "0.148.0" else {"second", "third"})
+
+
+def test_reconcile_names_a_storage_failure_that_starts_during_the_pass(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A transient read failure of another workspace's state fails the command as storage.
+
+    The command's first scan of the workspaces succeeds. Another workspace's document then
+    changes and cannot be read when the pass ingests its first row. The command must exit
+    with the typed, retryable storage error. It must not exit 0 with nothing accepted, which
+    is how a pass that was refused for missing consent ends.
+    """
+
+    from builders.codex_rollout import encode_lines, function_call, session_meta
+
+    state = tmp_path / "state"
+    workspace = tmp_path / "workspace"
+    other_workspace = tmp_path / "other"
+    workspace.mkdir()
+    other_workspace.mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "other-home"))
+    store = LocalObservationStore(_state=state)
+    commitment = store.workspace_commitment(str(workspace))
+    other = store.workspace_commitment(str(other_workspace))
+    store.grant_consent(commitment)
+    store.grant_consent(other)
+    other_path = (
+        state / "observation" / "workspaces" / (other.removeprefix("hmac-sha256:") + ".json")
+    )
+    path = tmp_path / "manual-recovery.jsonl"
+    path.write_bytes(encode_lines(session_meta(), function_call(name="shell", call_id="first")))
+    real_pass = observe_cli.reconcile_session_stream_path
+    real_open = os.open
+    unreadable = False
+
+    def failing_open(
+        target: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        if unreadable and os.fspath(target) == os.fspath(other_path):
+            raise OSError(errno.EIO, os.strerror(errno.EIO))
+        return real_open(target, flags, mode, dir_fd=dir_fd)
+
+    def pass_after_the_document_changed(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        nonlocal unreadable
+        # A new modification time makes the store read the document again, not its cached copy.
+        os.utime(other_path, ns=(1, 1))
+        unreadable = True
+        return real_pass(*args, **kwargs)
+
+    monkeypatch.setattr(os, "open", failing_open)
+    monkeypatch.setattr(
+        observe_cli, "reconcile_session_stream_path", pass_after_the_document_changed
+    )
+    code = observe_cli.reconcile_session_stream(
+        session_file=str(path), workspace=str(workspace), json_output=True, _state=state
+    )
+    captured = capsys.readouterr()
+    assert code == 20
+    error = json.loads(captured.out)["error"]
+    assert (error["operation"], error["reason"], error["code"], error["retryable"]) == (
+        "reconcile",
+        "storage_unsafe",
+        "STORAGE_UNSAFE",
+        True,
+    )
+    session = store.session_commitment("recovery")
+    assert LocalObservationStore(_state=state).get_stream_cursor(commitment, session) is None
+
+    # The same command succeeds once the document can be read again.
+    unreadable = False
+    monkeypatch.setattr(observe_cli, "reconcile_session_stream_path", real_pass)
+    assert (
+        observe_cli.reconcile_session_stream(
+            session_file=str(path), workspace=str(workspace), json_output=True, _state=state
+        )
+        == 0
+    )
+    cursor = LocalObservationStore(_state=state).get_stream_cursor(commitment, session)
+    assert cursor is not None
+    assert cursor.byte_position == path.stat().st_size
 
 
 def test_explicit_recovery_uses_full_mapped_native_session_id(
@@ -1939,13 +2364,28 @@ def test_checks_operations_name_missing_policy_and_say_it_is_not_a_blocker(
     assert "not a task blocker" in err
 
 
+_WELL_FORMED_CHECK = (
+    b'format = "yoetz.approved-check-policy/1"\n[[checks]]\nid = "unit"\n'
+    b'argv = ["pytest"]\nnetwork = false\ntimeout_seconds = '
+)
+
+
 @pytest.mark.parametrize("operation", ["status", "preview", "trust", "run"])
+@pytest.mark.parametrize(
+    "policy",
+    [
+        b"format = 1\n",
+        _WELL_FORMED_CHECK + b"9" * 400 + b"\n",
+        _WELL_FORMED_CHECK + b"1000\n",
+    ],
+    ids=["broken_toml_shape", "timeout_too_large_for_a_float", "timeout_out_of_range"],
+)
 def test_checks_operations_keep_invalid_policy_for_a_broken_file(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], operation: str
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], operation: str, policy: bytes
 ) -> None:
     workspace = tmp_path / "workspace"
     (workspace / ".finishup").mkdir(parents=True)
-    (workspace / ".finishup" / "checks.toml").write_bytes(b"format = 1\n")
+    (workspace / ".finishup" / "checks.toml").write_bytes(policy)
     kwargs: dict[str, object] = {"workspace": str(workspace), "_state": tmp_path / "state"}
     if operation == "trust":
         kwargs["policy_digest"] = "sha256:" + "0" * 64
@@ -1973,6 +2413,240 @@ def test_checks_operations_do_not_call_a_missing_workspace_a_policy_fault(
     assert code == 20
     assert "invalid_policy" not in err
     assert "policy_not_configured" not in err
+
+
+_UNPARSEABLE_STATE = b"{not json"
+
+
+def _trusted_policy_with_unparseable_state(tmp_path: Path) -> tuple[Path, Path, Path, str]:
+    """A consented workspace with a trusted check policy whose state file was then damaged.
+
+    Returns the workspace, the state root, the damaged state file and the trusted digest.
+    """
+
+    from finishup.application.observation_check_policy import load_observation_check_policy
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _write_check_policy(workspace)
+    state = tmp_path / "state"
+    assert observe_cli.grant_observation(workspace=str(workspace), _state=state) == 0
+    policy, _raw = load_observation_check_policy(workspace)
+    assert (
+        observe_cli.observe_checks_trust(
+            workspace=str(workspace), policy_digest=policy.raw_digest, _state=state
+        )
+        == 0
+    )
+    commitment = LocalObservationStore(_state=state).workspace_commitment(str(workspace))
+    document = (
+        state / "observation" / "workspaces" / f"{commitment.removeprefix('hmac-sha256:')}.json"
+    )
+    assert document.is_file()
+    document.write_bytes(_UNPARSEABLE_STATE)
+    return workspace, state, document, policy.raw_digest
+
+
+def _checks_verb_kwargs(
+    operation: str, workspace: Path, state: Path, digest: str, *, json_output: bool
+) -> dict[str, object]:
+    kwargs: dict[str, object] = {"workspace": str(workspace), "_state": state}
+    if operation == "trust":
+        kwargs["policy_digest"] = digest
+    elif operation != "revoke":
+        kwargs["json_output"] = json_output
+    return kwargs
+
+
+@pytest.mark.parametrize("operation", ["status", "preview", "trust", "revoke", "run"])
+def test_checks_verbs_name_a_corrupt_workspace_state_file_like_observe_status(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], operation: str
+) -> None:
+    """The store's typed refusal keeps its code, message and exit on every checks verb.
+
+    `status`, `preview` and `trust` used to let it escape as `internal_error` (exit 70), and
+    `run` and `revoke` reported it as `unavailable` (exit 20), while `observe status` named it.
+    """
+
+    workspace, state, document, digest = _trusted_policy_with_unparseable_state(tmp_path)
+    capsys.readouterr()
+    assert observe_cli.observe_status(workspace=str(workspace), json_output=False, _state=state)
+    sibling = capsys.readouterr().err
+    assert sibling == (
+        "observation_status_failed:storage_corrupt: Observation workspace state is invalid.\n"
+    )
+
+    code = getattr(observe_cli, f"observe_checks_{operation}")(
+        **_checks_verb_kwargs(operation, workspace, state, digest, json_output=False)
+    )
+
+    captured = capsys.readouterr()
+    assert code == 40
+    assert captured.out == ""
+    assert captured.err == sibling.replace(
+        "observation_status_", f"observation_checks_{operation}_"
+    )
+    # The refused file is left byte-identical for repair, never replaced by an empty state.
+    assert document.read_bytes() == _UNPARSEABLE_STATE
+
+
+@pytest.mark.parametrize("operation", ["status", "preview", "run"])
+def test_checks_verbs_emit_the_json_error_for_a_corrupt_workspace_state_file(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], operation: str
+) -> None:
+    workspace, state, document, digest = _trusted_policy_with_unparseable_state(tmp_path)
+    capsys.readouterr()
+    assert observe_cli.observe_status(workspace=str(workspace), json_output=True, _state=state)
+    sibling = json.loads(capsys.readouterr().out)["error"]
+    assert sibling["code"] == "STORAGE_CORRUPT"
+
+    code = getattr(observe_cli, f"observe_checks_{operation}")(
+        **_checks_verb_kwargs(operation, workspace, state, digest, json_output=True)
+    )
+
+    captured = capsys.readouterr()
+    assert code == 40
+    assert captured.err == ""
+    assert json.loads(captured.out) == {"error": {**sibling, "operation": f"checks_{operation}"}}
+    assert document.read_bytes() == _UNPARSEABLE_STATE
+
+
+@pytest.mark.parametrize("operation", ["status", "preview", "trust", "revoke", "run"])
+def test_checks_commands_exit_with_the_store_code_for_a_corrupt_workspace_state_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    operation: str,
+) -> None:
+    """Through the console entry point: exit 40 and the typed line, never `internal_error`."""
+
+    import finishup.adapters.integrations.observation_local as local
+    from finishup.cli.app import main
+
+    workspace, state, document, digest = _trusted_policy_with_unparseable_state(tmp_path)
+    capsys.readouterr()
+    monkeypatch.setattr(local, "state_dir", lambda: state)
+    argv = ["finishup", "observe", "checks", operation, "--workspace", str(workspace)]
+    if operation == "trust":
+        argv += ["--policy-digest", digest]
+    monkeypatch.setattr(sys, "argv", argv)
+
+    with pytest.raises(SystemExit) as exit_:
+        main()
+
+    captured = capsys.readouterr()
+    assert exit_.value.code == 40, captured.err
+    assert captured.out == ""
+    assert captured.err == (
+        f"observation_checks_{operation}_failed:storage_corrupt: "
+        "Observation workspace state is invalid.\n"
+    )
+    assert document.read_bytes() == _UNPARSEABLE_STATE
+
+
+_CHECKS_VERB_STORE_CALL = {
+    "status": "policy_digest_is_trusted",
+    "preview": "policy_digest_is_trusted",
+    "trust": "trust_policy_digest",
+    "revoke": "revoke_policy_trust",
+    "run": "policy_digest_is_trusted",
+}
+
+
+@pytest.mark.parametrize("operation", ["status", "preview", "trust", "revoke", "run"])
+@pytest.mark.parametrize("method", ["workspace_commitment", "state"])
+def test_checks_verbs_keep_a_retryable_store_refusal_retryable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    operation: str,
+    method: str,
+) -> None:
+    """A transient unreadable key or state file stays `STORAGE_UNSAFE`, exit 20, retryable."""
+
+    from finishup.application.observation_check_policy import load_observation_check_policy
+    from finishup.protocol.errors import PublicErrorCode, PublicOperationError
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _write_check_policy(workspace)
+    policy, _raw = load_observation_check_policy(workspace)
+
+    def unreadable(self: LocalObservationStore, *args: object) -> object:
+        del self, args
+        raise PublicOperationError(
+            PublicErrorCode.STORAGE_UNSAFE, "Observation workspace state is unavailable.", True
+        )
+
+    monkeypatch.setattr(
+        LocalObservationStore,
+        _CHECKS_VERB_STORE_CALL[operation] if method == "state" else method,
+        unreadable,
+    )
+    json_output = operation in {"status", "preview", "run"}
+
+    code = getattr(observe_cli, f"observe_checks_{operation}")(
+        **_checks_verb_kwargs(
+            operation, workspace, tmp_path / "state", policy.raw_digest, json_output=json_output
+        )
+    )
+
+    captured = capsys.readouterr()
+    assert code == 20
+    if json_output:
+        assert captured.err == ""
+        assert json.loads(captured.out) == {
+            "error": {
+                "code": "STORAGE_UNSAFE",
+                "message": "Observation workspace state is unavailable.",
+                "operation": f"checks_{operation}",
+                "reason": "storage_unsafe",
+                "retryable": True,
+            }
+        }
+    else:
+        assert captured.out == ""
+        assert captured.err == (
+            f"observation_checks_{operation}_failed:storage_unsafe: "
+            "Observation workspace state is unavailable.\n"
+        )
+
+
+@pytest.mark.parametrize("operation", ["status", "preview", "trust", "revoke", "run"])
+def test_checks_verbs_bound_an_untyped_store_fault_as_unavailable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    operation: str,
+) -> None:
+    """A store fault with no public code (a full disk, a lock wait that ran out) is `unavailable`.
+
+    `status`, `preview` and `trust` used to let it escape to the console as `internal_error`.
+    """
+
+    from finishup.application.observation_check_policy import load_observation_check_policy
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _write_check_policy(workspace)
+    policy, _raw = load_observation_check_policy(workspace)
+
+    def no_space(self: LocalObservationStore, *args: object) -> object:
+        del self, args
+        raise OSError(errno.ENOSPC, "CANARY")
+
+    monkeypatch.setattr(LocalObservationStore, _CHECKS_VERB_STORE_CALL[operation], no_space)
+
+    code = getattr(observe_cli, f"observe_checks_{operation}")(
+        **_checks_verb_kwargs(
+            operation, workspace, tmp_path / "state", policy.raw_digest, json_output=True
+        )
+    )
+
+    captured = capsys.readouterr()
+    assert code == 20
+    assert captured.out == ""
+    assert captured.err == f"observation_checks_{operation}_failed:unavailable\n"
 
 
 @pytest.mark.anyio

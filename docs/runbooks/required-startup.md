@@ -14,7 +14,9 @@ The mode changes the artifact digest. An approval for optional bytes cannot inst
 `integrate <host> plugin status --json` reports the selected `startup_mode` and
 `installed_startup_mode`. Omitting the option preserves a marker-verified installed mode, including
 the common setup connection flow. New installations default to optional. Foreign or modified
-trees remain protected; an unverified installed mode is null.
+trees remain protected; an unverified installed mode is null. The setup connection flow keeps the
+marker-verified installed observation profile the same way, so it never reverts ordinary hooks to
+structural ones.
 
 To disable, preview and apply an update/replace with `--startup-mode optional`, then reload the
 host plugin or start a fresh session. Existing disable/remove/disconnect controls also remove its
@@ -39,8 +41,8 @@ uses tools and needs a plan in required mode. Optional mode keeps its usual triv
 
 Tool/schema discovery, the FinishUP skill, registered guidance, clarification and FinishUP workflow calls
 remain possible. Direct commands through the current runtime's exact FinishUP launcher for service
-status/diagnostics/restart, consent catalog/prepare/status/review/authorize and vault unlock reach
-normal host admission. Pipelines, substitutions, compound commands and other launchers do not
+status/diagnostics/restart/unlock and consent catalog/prepare/status/review/authorize reach normal
+host admission; `service unlock` is the vault unlock the `vault_locked` continuation names. Pipelines, substitutions, compound commands and other launchers do not
 qualify. This grants no repair, consent, credential or disclosure authority: the typed continuation,
 current user instruction and existing owner ceremony still apply.
 
@@ -63,7 +65,11 @@ plan/obligation ids and bounded pending request identities. It stores no prompt,
 transcript, credential, or model-authored readiness flag. Before a `start` or `publish_work` that
 carries a `request_id`, the gate records that identity; an id-less `publish_work` is tracked only
 from its result (see the limits below). Only matching accepted output can nominate a route and
-plan. Newly accepted obligations must be in that plan. Failed/dry-run writes, old accepted
+plan. The gate reads a `start`, `publish_work` or `status` result in the same host shapes the
+scoped `start` binder admits: an object carrying `structuredContent`, an object whose `content` is
+a single-text-block list, a bare result object, a bare single-text-block content list, or a JSON
+string of one of those; any other shape settles nothing. Newly accepted obligations must be in
+that plan. Failed/dry-run writes, old accepted
 timestamps, wrong routes and earlier-scope responses cannot create current readiness. Hook
 auto-mapping alone is insufficient.
 
@@ -87,7 +93,9 @@ plan prose matches the user's intent.
 
 Gate locks are nonblocking and independent of observation locks, capture, spool, drain and advice.
 The service probe has a 650 ms asynchronous budget inside a 1.25 s subprocess deadline; gate hooks
-have a 3 s host timeout. Controlled failures at a block-capable boundary deny substantive tools.
+have a 3 s host timeout. The 650 ms covers the probe's new connection and one compact status; its
+imports and the build of the models that status uses come before it, inside the 1.25 s.
+Controlled failures at a block-capable boundary deny substantive tools.
 Bootstrap still reaches normal host admission even when gate state is unreadable. Errors expose only
 closed reasons, never payloads.
 

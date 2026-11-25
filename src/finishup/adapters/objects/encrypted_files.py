@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import stat
+import weakref
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from threading import RLock
+from threading import Lock, RLock
 from typing import Final, cast
 
 from cryptography.exceptions import InvalidTag
@@ -56,6 +58,18 @@ _DETERMINISTIC_OPEN_OSERRORS: Final = frozenset(
         "object_root_unsafe",
     }
 )
+
+# Staging temps a stage in this process can still finalize, by file name (the name carries 128
+# random bits). An entry lives exactly as long as its handle: while the issuing store or the caller
+# still holds the stage. A reserved-id retry may reclaim a temp for its id only when no entry names
+# it, which means the attempt that wrote it is gone (a killed or restarted service). Other
+# processes cannot be seen here; the service singleton lock is what rules out a second live writer
+# for one bundle, as it does for every other write beneath it.
+_LIVE_STAGE_TEMPS: Final[weakref.WeakValueDictionary[str, _FileStageHandle]] = (
+    weakref.WeakValueDictionary()
+)
+_LIVE_STAGE_TEMPS_LOCK: Final = Lock()
+_STAGE_TEMP_SUFFIX: Final = re.compile(r"\.[0-9a-f]{32}\.tmp")
 
 type CurrentRootSnapshot = Callable[[], Awaitable[ObjectRootSnapshot]]
 
@@ -156,7 +170,7 @@ def same_reference_header(ref: ObjectRef, envelope: ObjectEnvelope) -> bool:
     )
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, weakref_slot=True)
 class _FileStageHandle:
     store_token: object
     temp_path: Path
@@ -169,6 +183,12 @@ class _StageState:
     staged: StagedObject
     finalized: ObjectRef | None = None
     abandoned: bool = False
+
+
+def _release_stage_temp(handle: _FileStageHandle) -> None:
+    with _LIVE_STAGE_TEMPS_LOCK:
+        if _LIVE_STAGE_TEMPS.get(handle.temp_path.name) is handle:
+            del _LIVE_STAGE_TEMPS[handle.temp_path.name]
 
 
 class EncryptedFilesObjectStore:
@@ -221,6 +241,7 @@ class EncryptedFilesObjectStore:
         plaintext = await read_object_source(source)
         with self._lock:
             self._prepare_directories()
+            reserved = object_id is not None
             if object_id is not None:
                 try:
                     validate_id(IdKind.OBJECT, object_id)
@@ -282,8 +303,6 @@ class EncryptedFilesObjectStore:
                     )
                     self._stages[id(handle)] = _StageState(staged, finalized=ref)
                     return staged
-                if any(self._staging_root.glob(f"{object_id}.*.tmp")):
-                    raise OSError("object_destination_collision")
             else:
                 object_id = self._allocate_object_id()
                 final_path = self._path_for(object_id)
@@ -293,9 +312,18 @@ class EncryptedFilesObjectStore:
             )
             frame = self._encrypt_frame(object_id, plaintext, payload_nonce, metadata)
             envelope_digest = f"sha256:{hashlib.sha256(frame).hexdigest()}"
-            temp_path = self._new_temp_path(object_id)
-            self._write_temp(temp_path, frame)
-            handle = _FileStageHandle(self._token, temp_path, final_path)
+            with _LIVE_STAGE_TEMPS_LOCK:
+                if reserved:
+                    self._reclaim_dead_stage_temps(object_id)
+                temp_path = self._new_temp_path(object_id)
+                handle = _FileStageHandle(self._token, temp_path, final_path)
+                # Registered before the file exists, so a concurrent reclaim never sees it unowned.
+                _LIVE_STAGE_TEMPS[temp_path.name] = handle
+            try:
+                self._write_temp(temp_path, frame)
+            except BaseException:
+                _release_stage_temp(handle)
+                raise
             staged = StagedObject(
                 object_id=object_id,
                 plaintext_size=len(plaintext),
@@ -325,6 +353,7 @@ class EncryptedFilesObjectStore:
             else:
                 self._fsync_file(handle.temp_path)
                 os.replace(handle.temp_path, handle.final_path)
+            _release_stage_temp(handle)
             self._fsync_directory(handle.final_path.parent)
             result = object_ref_from_staged(staged)
             state.finalized = result
@@ -373,6 +402,7 @@ class EncryptedFilesObjectStore:
             if failures:
                 # The stage stays un-abandoned so a later retry re-attempts both paths.
                 raise failures[0]
+            _release_stage_temp(handle)
             state.abandoned = True
 
     async def _open_verified_bytes(self, ref: ObjectRef) -> bytes:
@@ -659,6 +689,32 @@ class EncryptedFilesObjectStore:
             if str(exc) == "object_root_missing":
                 raise FileNotFoundError from exc
             raise
+
+    def _reclaim_dead_stage_temps(self, object_id: str) -> None:
+        """Remove the temps of a reserved id that no stage in this process can still finalize.
+
+        A service killed between stage and finalize leaves its temp behind; the retry that reuses
+        the persisted reserved id must not wait out the orphan window. A temp a live stage owns,
+        or any entry that is not a private regular file of the exact temp shape, is still a
+        collision and is left untouched. Caller holds ``_LIVE_STAGE_TEMPS_LOCK``.
+        """
+
+        dead: list[Path] = []
+        for path in self._staging_root.glob(f"{object_id}.*.tmp"):
+            if (
+                path.name in _LIVE_STAGE_TEMPS
+                or _STAGE_TEMP_SUFFIX.fullmatch(path.name, len(object_id)) is None
+                or not self._eligible_regular_file(path, float("inf"))
+            ):
+                raise OSError("object_destination_collision")
+            dead.append(path)
+        for path in dead:
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                continue
+        if dead:
+            self._fsync_directory(self._staging_root)
 
     def _new_temp_path(self, object_id: str) -> Path:
         for _ in range(128):

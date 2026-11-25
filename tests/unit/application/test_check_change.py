@@ -985,11 +985,30 @@ def test_dot_relative_statement_paths_keep_their_meaning() -> None:
         "files/guide.md",
     )
     assert task_input_paths(projection, "Read ../shared/spec.md.") == ()
+    # Stripping ``./`` never uncovers a parent step or an absolute path (#1410).
+    assert task_input_paths(projection, "Read ./../shared/spec.md.") == ()
+    assert task_input_paths(projection, "Read ././../shared/spec.md.") == ()
+    assert task_input_paths(projection, "Read .//shared/spec.md.") == ("shared/spec.md",)
+    assert task_input_paths(projection, "Read ././/docs/spec.md.") == ("docs/spec.md",)
     assert task_input_paths(projection, "The inputs are in ./data/ now.") == ("data/",)
     assert task_input_paths(projection, "Read /app/spec.md. Then src/a.py!") == (
         "/app/spec.md",
         "src/a.py",
     )
+
+
+def test_a_dot_double_slash_statement_path_is_never_an_outside_input() -> None:
+    """#1410 (AIP-5): ``.//shared/spec.md`` names the workspace's ``shared/spec.md``, so it is no
+    absolute candidate the outside-input read may probe or offer."""
+
+    from finishup.application.check_change import (
+        outside_input_candidates,
+        statement_input_paths,
+    )
+
+    start = statement_input_paths("Read .//shared/spec.md.")
+    assert start == ("shared/spec.md",)
+    assert outside_input_candidates(start, frozenset(), "/work/repo", (), ()) == ()
 
 
 def test_an_input_only_a_verification_named_is_labelled_as_its_oracle() -> None:

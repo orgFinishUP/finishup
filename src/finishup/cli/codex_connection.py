@@ -19,6 +19,7 @@ from finishup.adapters.integrations.codex_marketplace import (
     other_members,
     possible_projects,
     preview_removal,
+    probe_window,
     serving_projects,
     skill_tree_state,
 )
@@ -95,6 +96,9 @@ def _legacy_tree_changes(project_root: str, managed_paths: tuple[str, ...]) -> l
     return [change for parts, change in _LEGACY_TREE_CHANGES if root.joinpath(*parts) in managed]
 
 
+# A plan's reads probe the Codex executable once (`probe_window`); its apply and status do not
+# share that probe.
+@probe_window()
 def prepare_codex_connection(
     installation: HostInstallation,
     project: Path,

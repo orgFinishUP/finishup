@@ -178,7 +178,13 @@ def _head_tail(head: bytes, tail: bytes, total: int) -> bytes:
 def task_input_from_bytes(
     name: str, content: bytes, *, origin: TaskInputOrigin = "task"
 ) -> TaskInputFile | None:
-    """One task input from a whole read: text (head and tail when long) or a summary."""
+    """One task input from a whole read: text (head and tail when long) or a summary.
+
+    A short text is kept whole. An undecodable byte becomes U+FFFD, three bytes for one, so a
+    short text with many of them (a Latin-1 CSV, say) can outgrow the bound; it then drops those
+    bytes, as the head and tail of a long text do, and so is never longer than the file; one with
+    no decodable byte at all is summarized like a binary.
+    """
 
     if not content:
         return None
@@ -187,6 +193,10 @@ def task_input_from_bytes(
         return _summary(name, content, total, origin)
     if total <= MAX_TASK_INPUT_TEXT_BYTES:
         text = _decode(content).encode("utf-8")
+        if len(text) > MAX_TASK_INPUT_TEXT_BYTES:
+            text = content.decode("utf-8", errors="ignore").encode("utf-8")
+            if not text:
+                return _summary(name, content, total, origin)
     else:
         text = _head_tail(content, content, total)
     try:

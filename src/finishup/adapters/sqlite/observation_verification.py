@@ -45,14 +45,28 @@ class SqliteObservationVerificationRepository:
             token = int(row[0]) if row is not None else 0
             for approval in approvals:
                 existing = self._db.execute(
-                    "SELECT job_id FROM observation_verification_jobs "
+                    "SELECT job_id,status FROM observation_verification_jobs "
                     "WHERE workspace_commitment=? AND policy_digest=? "
                     "AND approval_commitment=? AND subject_state_digest=?",
                     (workspace, policy_digest, approval, subject_state_digest),
                 ).fetchone()
-                if existing is not None:
+                if existing is not None and existing[1] != "stale":
+                    # Pending or running work for this state, or a current result for it,
+                    # already covers the observation.
                     continue
                 token += 1
+                if existing is not None:
+                    # The workspace came back to a state whose work was superseded or whose
+                    # result went non-current: re-arm that job as the latest work.
+                    self._db.execute(
+                        "UPDATE observation_verification_jobs SET status='pending',"
+                        "state_token=?,service_generation=NULL,lease_owner=NULL,"
+                        "lease_generation=NULL,lease_expires_at=NULL,updated_at=? "
+                        "WHERE job_id=? AND status='stale'",
+                        (token, enqueued_at, existing[0]),
+                    )
+                    created.append(str(existing[0]))
+                    continue
                 job_id = (
                     "job_"
                     + hashlib.sha256(
@@ -184,7 +198,16 @@ class SqliteObservationVerificationRepository:
                 "subject_state_before,subject_state_after,result_commitment,"
                 "output_object_id,limitations_json,is_current,recorded_at) "
                 "VALUES(?,?,?,?,?,?,?,?,?,?,?,?) "
-                "ON CONFLICT(job_id,check_id) DO NOTHING",
+                # A re-armed job's new run supersedes the result of its earlier run; the
+                # lease check above keeps any one run from recording twice.
+                "ON CONFLICT(job_id,check_id) DO UPDATE SET "
+                "result_id=excluded.result_id,status=excluded.status,"
+                "subject_state_before=excluded.subject_state_before,"
+                "subject_state_after=excluded.subject_state_after,"
+                "result_commitment=excluded.result_commitment,"
+                "output_object_id=excluded.output_object_id,"
+                "limitations_json=excluded.limitations_json,"
+                "is_current=excluded.is_current,recorded_at=excluded.recorded_at",
                 (
                     result_id,
                     job.job_id,

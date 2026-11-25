@@ -32,6 +32,7 @@ from finishup.adapters.integrations.host_admission import (
     preview_host_admission,
     sweep_host_admission,
 )
+from finishup.config.toml_text import load_toml_text
 from finishup.protocol.canonical import JsonValue, canonical_encode
 
 __all__ = [
@@ -301,7 +302,7 @@ def _codex_config_enables_legacy_plugin(path: Path) -> bool | None:
     if len(raw) > _MAX_CODEX_CONFIG_BYTES:
         return None
     try:
-        parsed = tomllib.loads(raw.decode("utf-8"))
+        parsed = load_toml_text(raw.decode("utf-8"))
     except (UnicodeError, tomllib.TOMLDecodeError):
         return None
     plugins = parsed.get("plugins")
@@ -488,17 +489,53 @@ def _codex_selectors(codex_path: Path | None, codex_home: Path | None) -> str:
     return selectors
 
 
+def _route_selectors(
+    *,
+    claude_path: Path | None,
+    claude_config_root: Path | None,
+    cache_root: Path | None,
+    marketplace_root: Path | None,
+    cursor_config_root: Path | None,
+    ownership_name: str,
+    route_name: str | None,
+) -> str:
+    """Path-free forms of the Claude and Cursor route selectors the preview observed through."""
+
+    selectors = ""
+    for flag, value in (
+        ("--claude-path", claude_path),
+        ("--claude-config-root", claude_config_root),
+        ("--cache-root", cache_root),
+        ("--marketplace-root", marketplace_root),
+        ("--cursor-config-root", cursor_config_root),
+    ):
+        if value is not None:
+            selectors += f" {flag} <{flag.removeprefix('--')}>"
+    # Only the fixed vocabulary is echoed; any other spelling stays out of the continuation.
+    if ownership_name == "plugin-managed":
+        selectors += " --mcp-ownership plugin-managed"
+    if route_name in {"strict", "policy"}:
+        selectors += f" --route-profile {route_name}"
+    return selectors
+
+
 def _next_command(
     harness: str,
     action: HostAdmissionAction,
     *,
+    checkpoint: bool = False,
     codex_path: Path | None = None,
     codex_home: Path | None = None,
+    route_selectors: str = "",
 ) -> str:
+    """The apply step for a preview, carrying every selector its route reading and digest used."""
+
     verb = "grant" if action is HostAdmissionAction.GRANT else "revoke"
+    # The preview digest binds the checkpoint choice for either action.
+    checkpoint_flag = " --checkpoint" if checkpoint else ""
     return (
         f"finishup integrate {harness} admission {verb} --project-root <root>"
-        f"{_codex_selectors(codex_path, codex_home)} "
+        f"{_codex_selectors(codex_path, codex_home)}{route_selectors}{checkpoint_flag} "
         "--accept --preview-digest <preview_digest>"
     )
 
@@ -614,7 +651,20 @@ async def run_host_admission_command(
                 **preview.as_json(),
                 **facts.as_json(),
                 "next_command": _next_command(
-                    host, action, codex_path=codex_path, codex_home=codex_home
+                    host,
+                    action,
+                    checkpoint=checkpoint,
+                    codex_path=codex_path,
+                    codex_home=codex_home,
+                    route_selectors=_route_selectors(
+                        claude_path=claude_path,
+                        claude_config_root=claude_config_root,
+                        cache_root=cache_root,
+                        marketplace_root=marketplace_root,
+                        cursor_config_root=cursor_config_root,
+                        ownership_name=ownership_name,
+                        route_name=route_name,
+                    ),
                 ),
                 "scope": "project",
             }

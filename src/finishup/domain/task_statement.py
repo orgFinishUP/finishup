@@ -35,7 +35,10 @@ from finishup.domain.events import (
 from finishup.domain.privacy import PrivacyPolicy, ReviewSelectionPolicy
 from finishup.domain.values import EventId, event_id, validate_sha256_digest
 from finishup.protocol.errors import ProtocolValueError
-from finishup.protocol.models import MAX_TASK_STATEMENT_BYTES, DataCategory
+from finishup.protocol.model_values import (
+    MAX_TASK_STATEMENT_BYTES,
+    DataCategory,
+)
 
 __all__ = [
     "TASK_STATEMENT_GAPS",

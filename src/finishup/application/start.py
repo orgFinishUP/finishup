@@ -157,6 +157,12 @@ class _StartApplication(Protocol):
 # and before its lifecycle event, keyed by that event's id. ``None`` keeps none.
 type StartInputCapture = Callable[[TaskRuntime, str, SnapshotBoundary], Awaitable[None]]
 
+# ADR-031 decision 3: keeps HEAD as the task-start change base of the task whose runtime it gets,
+# called only by a start that created that task (a create, a parent-registered child, or a
+# delegated child's bundle), before its result returns. Best effort and idempotent: it never
+# raises and never replaces a base already kept. ``None`` keeps none.
+type StartBaseCapture = Callable[[TaskRuntime], Awaitable[None]]
+
 
 @dataclass(frozen=True, slots=True)
 class StartInternalResult:
@@ -1000,8 +1006,14 @@ async def _execute_standard_start(
     sync_lineage: bool = True,
     input_capture: StartInputCapture | None = None,
     session_workspace_ref: str | None = None,
+    base_capture: StartBaseCapture | None = None,
 ) -> StartInternalResult:
-    """Execute one seven-step start operation against service-owned ports."""
+    """Execute one seven-step start operation against service-owned ports.
+
+    ``base_capture`` runs on the task's runtime when this start opens a task it created (a
+    ``created`` route, or ``force_open`` from parent registration); a handle attach passes none,
+    because the delegation that created that child already kept its base.
+    """
 
     command = command or await _command(app, request, repository_privacy_commitment)
     allocation = await _reserve(app.start_catalog, command)
@@ -1120,6 +1132,8 @@ async def _execute_standard_start(
                 allocation.session_id,
                 repository_privacy_commitment,
             )
+        if base_capture is not None and (allocation.route_action == "created" or force_open):
+            await base_capture(task)
         return result
     except _StartContradiction as exc:
         await _quarantine(app.start_catalog, allocation, exc)
@@ -1480,6 +1494,7 @@ async def _execute_self_registration(
     input_capture: StartInputCapture | None = None,
     *,
     session_workspace_ref: str | None = None,
+    base_capture: StartBaseCapture | None = None,
 ) -> StartInternalResult:
     lineage = _lineage_for(app)
     parent_session_id = request.parent_session_id
@@ -1533,6 +1548,7 @@ async def _execute_self_registration(
         provision_mode=BundleProvisionMode.CREATED,
         input_capture=input_capture,
         session_workspace_ref=session_workspace_ref,
+        base_capture=base_capture,
     )
     await _merge_host_annotation(
         app,
@@ -1588,7 +1604,15 @@ def _synthetic_child_allocation(
 async def _provision_delegated_child(
     app: _StartApplication,
     operation: DelegationOperation,
+    base_capture: StartBaseCapture | None = None,
 ) -> None:
+    """Provision the delegated child's inert bundle and keep its task-start base (ADR-031).
+
+    The delegation is the start that created the child, so its base is kept here, in the child's
+    own bundle, before the delegation result returns. Recovery passes no ``base_capture``: a base
+    read by a later recovery would postdate the creation it claims.
+    """
+
     route_lookup = getattr(app.start_catalog, "task_route", None)
     if not callable(route_lookup):
         raise _lineage_unavailable()
@@ -1608,6 +1632,8 @@ async def _provision_delegated_child(
     try:
         task = await app.runtime.provision_start(_provision_command(app, allocation, route=route))
         await app.runtime.verify_start(task, _expectation(allocation, StartMilestone.BUNDLE_READY))
+        if base_capture is not None:
+            await base_capture(task)
     finally:
         if task is not None:
             await app.runtime.release(task)
@@ -1913,6 +1939,7 @@ async def _execute_delegation(
     app: _StartApplication,
     request: StartRequest,
     repository_privacy_commitment: str | None,
+    base_capture: StartBaseCapture | None = None,
 ) -> StartInternalResult:
     lineage = _lineage_for(app)
     if request.session_id is None:
@@ -1986,7 +2013,7 @@ async def _execute_delegation(
     )
     operation = reservation.operation
     if operation.phase is DelegationPhase.LINEAGE_RESERVED:
-        await _provision_delegated_child(app, operation)
+        await _provision_delegated_child(app, operation, base_capture)
         operation = await lineage.mark_child_bundle_ready(
             operation.operation_id, operation.request_digest
         )
@@ -2072,6 +2099,7 @@ async def execute_start(
     repository_privacy_commitment: str | None = None,
     input_capture: StartInputCapture | None = None,
     session_workspace_ref: str | None = None,
+    base_capture: StartBaseCapture | None = None,
 ) -> StartInternalResult:
     """Route ordinary starts and the lineage admission paths through one facade.
 
@@ -2080,10 +2108,14 @@ async def execute_start(
     create, a parent-registered child and a child attached by its attach handle are durably
     claim-bound. It goes into the opening event only, never into the request's identity; a
     delegation opens no session and ignores it; ``None`` everywhere else.
+
+    ``base_capture`` keeps the task-start change base (ADR-031 decision 3) of the task a start
+    creates: a create, a parent-registered child, and a delegated child (in its own bundle, not
+    the parent's). A handle attach, a reattach, a resume and a replay record none.
     """
 
     if request.mode == "delegate":
-        return await _execute_delegation(app, request, repository_privacy_commitment)
+        return await _execute_delegation(app, request, repository_privacy_commitment, base_capture)
     if request.attach_handle is not None:
         return await _execute_handle_attach(
             app,
@@ -2099,6 +2131,7 @@ async def execute_start(
             repository_privacy_commitment,
             input_capture,
             session_workspace_ref=session_workspace_ref,
+            base_capture=base_capture,
         )
     return await _execute_standard_start(
         app,
@@ -2106,4 +2139,5 @@ async def execute_start(
         repository_privacy_commitment=repository_privacy_commitment,
         input_capture=input_capture,
         session_workspace_ref=session_workspace_ref,
+        base_capture=base_capture,
     )

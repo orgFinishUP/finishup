@@ -1358,10 +1358,13 @@ def _command_execution_workdir(body: Mapping[str, JsonValue]) -> tuple[bool, str
     return True, path
 
 
-# The hook process's own facts for one command a rollout row names: ``(script, workdir) ->``
+# The hook process's own facts for one command a rollout row names: ``(command, workdir) ->``
 # ``install_target``, ``write_scope`` and ``effective_user`` exactly as its hook copy would carry
-# them (``cli.runtime_facts.runtime_structural_facts``, #1106 r2). Only the closed tokens return.
-type StreamCommandFacts = Callable[[str, str | None], Mapping[str, object]]
+# them (``cli.runtime_facts.runtime_structural_facts``, #1106 r2). *command* is the value as the
+# row states it, a string or a native argv, the same value the hook copy's ``tool_input`` holds:
+# the hook's reader unwraps an argv by its own rules, so a noexec one (``["bash", "-nc", X]``)
+# installs nothing on either copy. Only the closed tokens return.
+type StreamCommandFacts = Callable[[str | list[str], str | None], Mapping[str, object]]
 _HOOK_COMMAND_FACT_KEYS: Final = ("install_target", "write_scope", "effective_user")
 
 
@@ -1404,10 +1407,12 @@ def _command_facts(
     runner = native_command_runner_class(value)
     if runner is not None:
         fields["runner_class"] = runner
+    command: str | list[str]
     if type(value) is str:
-        raw_command = value
+        command = raw_command = value
     elif isinstance(value, (list, tuple)) and value and all(type(word) is str for word in value):
-        raw_command = shlex.join(cast(list[str], list(value)))
+        command = cast(list[str], list(value))
+        raw_command = shlex.join(command)
     else:
         return
     # A native argv is read as its script, so a long heredoc patch is still named (#1106 r2).
@@ -1419,7 +1424,7 @@ def _command_facts(
             # A stated ``workdir`` that is no string is passed as ``.``: a relative directory,
             # which the hook's rule never places.
             hook_facts = command_facts(
-                script, (directory if directory is not None else ".") if stated else None
+                command, (directory if directory is not None else ".") if stated else None
             )
         for key in _HOOK_COMMAND_FACT_KEYS:
             item = hook_facts.get(key)
@@ -2436,7 +2441,8 @@ def _rollout_item_decisions(
       decision 15 then corrects the hook's ``unknown`` row), and an item whose id is a stated
       hook call is that post's ``copy``;
     * a command item whose exit equals an unpaired stated exit of a hook post for the same
-      command commitment is that post's ``copy``;
+      command commitment is that post's ``copy``; a stated post has one copy, so once its own
+      item (same call id) is decided, its exit is no longer unpaired, whichever arrived first;
     * otherwise a command item is ``pending`` until the outcome-less hook calls of its
       commitment can be told apart from the calls it may still be a copy of.
 
@@ -2459,7 +2465,9 @@ def _rollout_item_decisions(
 
     unstated_calls: dict[str, str | None] = {}
     owed: dict[str, int] = {}
-    stated_exits: dict[str, list[int | None]] = {}
+    # Each unpaired stated post's exit, with the call id of the post it came from, so the post's
+    # own item, once it arrives, consumes that one entry and the post has exactly one copy.
+    stated_exits: dict[str, list[tuple[str | None, int | None]]] = {}
     stated_calls: set[str] = set()
     seen_exits: dict[str, set[int | None]] = {}
     open_calls: dict[str, set[str]] = {}
@@ -2556,7 +2564,7 @@ def _rollout_item_decisions(
             if joined is not None:
                 decide(joined, _ITEM_COPY)
             elif commitment is not None:
-                stated_exits.setdefault(commitment, []).append(exit_fact)
+                stated_exits.setdefault(commitment, []).append((call_id, exit_fact))
             settle(commitment)
             continue
         if envelope.source is not ObservationSource.CODEX_SESSION_STREAM or not _hooked_tool_item(
@@ -2573,9 +2581,18 @@ def _rollout_item_decisions(
             if earlier is not None and owed.get(earlier, 0) > 0:
                 owed[earlier] -= 1
         elif call_id is not None and call_id in stated_calls:
+            # The post's own item: its exit is no longer free for another call's item to claim.
+            if commitment is not None:
+                unpaired = stated_exits.get(commitment, [])
+                stated_exits[commitment] = [entry for entry in unpaired if entry[0] != call_id]
             decisions[envelope.source_identity] = _ITEM_COPY
-        elif commitment is not None and exit_fact in stated_exits.get(commitment, []):
-            stated_exits[commitment].remove(exit_fact)
+        elif commitment is not None and (
+            claimed := next(
+                (entry for entry in stated_exits.get(commitment, []) if entry[1] == exit_fact),
+                None,
+            )
+        ):
+            stated_exits[commitment].remove(claimed)
             decisions[envelope.source_identity] = _ITEM_COPY
         else:
             pending.append(

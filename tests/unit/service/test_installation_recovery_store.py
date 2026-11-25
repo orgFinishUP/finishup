@@ -476,3 +476,74 @@ def test_import_stages_pending_and_never_activates_on_its_own(tmp_path: Path) ->
         ).active_generation
         == 9
     )
+
+
+def _exported_set(tmp_path: Path, name: str, generation: int = 1) -> Path:
+    """Export one freshly published generation from its own installation as an archive."""
+
+    bundle = tmp_path / f"source-{name}"
+    bundle.mkdir(mode=0o700)
+    source = InstallationRecoverySetStore(bundle)
+    source.publish(_artifact(LocalSecretMemory(), generation))
+    archive = tmp_path / f"{name}.yirs"
+    source.export_generation(generation, archive)
+    return archive
+
+
+def test_reimporting_the_identical_pending_set_is_an_idempotent_retry(tmp_path: Path) -> None:
+    archive = _exported_set(tmp_path, "right")
+    target = _store(tmp_path)
+    first = target.import_archive(archive)
+    staged = target.load(1).canonical_bytes
+
+    # The confirmation was lost, so the operator runs the same import again.
+    assert target.import_archive(archive) == first
+    assert target.pending_import() == first
+    assert target.load(1).canonical_bytes == staged
+
+
+def test_a_wrong_pending_set_is_replaced_by_a_later_import_of_its_generation(
+    tmp_path: Path,
+) -> None:
+    wrong = _exported_set(tmp_path, "wrong")  # another installation's generation 1
+    right = _exported_set(tmp_path, "right")
+    target = _store(tmp_path)
+    wrong_metadata = target.import_archive(wrong)
+    continuation = target.begin_recovery(1)
+    target.finish_recovery(continuation, success=False)  # the recovery secret cannot open it
+
+    replaced = target.import_archive(right)
+    assert replaced != wrong_metadata
+    assert target.pending_import() == replaced
+    assert target.metadata(1) == replaced
+    # The replacement is itself retryable and can enter the restore ceremony.
+    assert target.import_archive(right) == replaced
+    assert target.begin_recovery(1)
+
+
+def test_a_pending_set_is_not_replaced_while_its_restore_is_in_flight(tmp_path: Path) -> None:
+    wrong = _exported_set(tmp_path, "wrong")
+    right = _exported_set(tmp_path, "right")
+    target = _store(tmp_path)
+    wrong_metadata = target.import_archive(wrong)
+    continuation = target.begin_recovery(1)
+
+    with pytest.raises(ValueError, match="installation_recovery_import_invalid"):
+        target.import_archive(right)
+    assert target.pending_import() == wrong_metadata
+    assert target.metadata(1) == wrong_metadata
+    # The identical set is still an idempotent retry, and the ceremony still owns its record.
+    assert target.import_archive(wrong) == wrong_metadata
+    target.finish_recovery(continuation, success=False)
+    assert target.pending_import() == wrong_metadata
+
+
+def test_importing_over_a_pending_set_never_replaces_published_authority(tmp_path: Path) -> None:
+    target = _store(tmp_path)
+    active = target.publish(_artifact(LocalSecretMemory(), 1))
+    foreign = _exported_set(tmp_path, "foreign")
+
+    with pytest.raises(ValueError, match="installation_recovery_import_invalid"):
+        target.import_archive(foreign)
+    assert target.pending_import() is None
+    assert target.metadata(1) == active

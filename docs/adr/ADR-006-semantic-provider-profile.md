@@ -892,7 +892,14 @@ single attempt requires only the effort its budget selected, and a missing effor
 The pinned app-server v2 protocol has no per-turn output ceiling. FinishUP therefore enforces the
 selected output limit on the runtime's own cumulative `thread/tokenUsage/updated` counters.
 Only visible output counts (`output_tokens − reasoning_output_tokens`), because reasoning
-tokens are governed by the effort. The check is applied to each valid snapshot. A snapshot over
+tokens are governed by the effort. The limit is per turn, as an API route's per-request
+`max_output_tokens` is: on a held reviewer thread (#1118) each turn counts only its own visible
+output, the thread's total less its visible output when the turn started. That start is the
+total the previous turn left, or, when that turn reported no usage or had a snapshot refused,
+the total before the turn's first reported request (that snapshot's `total` less its `last`).
+Until that request is reported, the last known total stands in, so a turn is never charged less
+than its own output. A one-shot check and a review's first turn start at zero. The check is
+applied to each valid snapshot. A snapshot over
 the limit interrupts the turn and ends it as the existing closed `output_oversize` stage
 (`invalid/response_schema_invalid`). That outcome is content-shaped, like API-path
 `max_output_tokens` truncation: it is never retried and never engages the fallback. When the
@@ -979,7 +986,9 @@ could have reached a provider (`authorization_missing` and `provider_unavailable
 refused admission writes no attempt, never claims review, and is reported with the coverage gap
 `advice_semantic_deferred`; the service schedules an in-memory revisit that rebuilds advice when
 the interval elapses, so the trailing condition is reviewed without waiting for another hook (the
-next hook re-derives the same deferral after a restart). A terminal non-success is never sticky:
+next hook re-derives the same deferral after a restart). Each session keeps one revisit at the
+earliest requested time: a sooner request replaces a later one, because each candidate identity has
+its own deferral. A terminal non-success is never sticky:
 the same identity is re-admitted as `<identity>#<generation>`, keeping every earlier receipt, after
 a backoff from its terminal time. `superseded` retries immediately; other pre-provider reasons
 (`authorization_missing`, `provider_unavailable`, `queue_full`) wait the base interval, and
@@ -1897,7 +1906,8 @@ claiming completion was never judged for completeness. Decisions:
   `citable_refs` lists only carried refs (content rows and surviving local assessment rows, the
   same set the text index holds); a challenge keeps the cited refs that were sent (disclosed as
   `semantic_review_refs_reduced`); a challenge with no sent ref — or any quote-bearing challenge
-  recovered without the text index — mints no finding but is counted as `ref_not_carried` and its
+  recovered without the text index, while its quote-free siblings stand as recorded (#1409) —
+  mints no finding but is counted as `ref_not_carried` and its
   summary and message are appended to the recorded review summary as an advisory, unverified
   concern. A verified row citing any unsent ref is still dropped. Quote proof tolerates transport
   form (whitespace, JSON escapes, typographic punctuation, a placeholder for FinishUP's `[REDACTED]`
@@ -3067,6 +3077,10 @@ content reads. Earlier 1.4.0/1.5.0 documents stay byte-identical.
 
 For attribution, each attempt's encrypted `yoetz.semantic-response/1` object gains optional
 `reviewer_read_usage`: at most five rows with call, action, validated args, status and reason.
+The reason is one of the closed set the service itself issues for a read result (the broker's
+refusals and truncations, the #1220 declared-test limits, the image limits and the privacy
+admission's refusals) or the row's own `outcome_unknown`/`deadline`; a row the service wrote is
+never dropped as unknown telemetry.
 Arguments are selector/path fields only; no returned text, hints, packet or judgment is copied.
 This private payload survives response recovery and includes failed reviews. Structural
 diagnostics contain the action/result code, request id and ordinal only; raw selectors/paths
@@ -3241,6 +3255,146 @@ changes: the task, writer authority, consent and repository grant, the effective
 digest and generation, the provider binding (endpoint, model, effort, reply schema), the runtime
 version and isolated configuration, and the review's input roots and read catalog. Reuse never
 crosses tasks.
+
+## Amendment — 2026-11-21: reviewer cache accounting keeps every exchange (#1172)
+
+At the maintainer's request, an API exchange keeps its token counts when an optional count is
+wrong. A stateless route's input and output counts must each be an integer from 0 to 2^53-1, or
+the exchange has no usage, as before. Its cached count is kept only when it is such an integer and
+at most the input, and its cache-write count only when it is such an integer. Until now a cached
+count above the input dropped the whole exchange's usage, so its input and output went unrecorded
+and the next exchange lost its prefix and its miss label. Such a count is now unknown, never zero:
+the exchange records its input and output, its input is the next exchange's prefix, and that next
+exchange gets a miss label only when its own cached count is known. A Chat Completions exchange is
+recorded `completed` exactly when its generation finished, the meaning the Responses status already
+has: a response without a choice, or a first choice whose finish reason is `length` (truncated) or
+`content_filter` (filtered), stays `incomplete`; a refusal that finished (`stop` with a refusal
+message, as Responses records a refusal whose status is `completed`) and an answer whose finish
+reason is anything else are `completed`, so an accepted answer whose finish reason is not `stop` is
+no longer recorded `incomplete`. That change adds no field or label.
+
+Every exchange now leaves a record, also at the maintainer's request. Until now an exchange without
+usable counts wrote nothing while the review's exchange index still advanced, so a reader could not
+tell a provider that reported no usage from counts FinishUP refused, or either from a line the
+diagnostics ring evicted. Such an exchange now records its index and one closed field,
+`reviewer_usage_state`: `unreported` when the provider reported no usage for it (an API answer
+without a usage object, a Codex turn in which no snapshot reported a request), `refused` when it
+reported counts FinishUP could not accept as consistent (API input or output counts that are not
+plain counters, a refused Codex usage snapshot, Codex counters that do not fit together). A
+compaction keeps its `compaction` label beside it. The record carries no token count and no other
+label, and the next exchange still gets no prefix and no guessed label. An exchange with counts
+never carries the field, and which Codex turns record counts is unchanged (#1192). The diagnostics
+fence admits the field with exactly those two values. Still not recorded, and not advancing the
+index: the local model route, the credential probe, an API request that fails before an answer
+arrives, and a Codex exchange that fails before its turn's settings are fixed (for example at
+launch or thread start). Within a review's records a missing index therefore means a lost line.
+The largest record is unchanged at 656 bytes.
+
+The `retry` label is unchanged, but what it means is now stated exactly. A format repair appends
+its note after the unchanged previous input on every route (Codex holds the rejected answer in its
+thread before the note; the stateless routes leave it out), so the repair is not what breaks the
+prefix. `retry` marks a shortfall that no compaction, first turn or settings change explains and
+that fell on the review's repair exchange. No egress or outcome changes.
+
+The records are now also summed, at the maintainer's request, because the revisit condition of
+"packet order and cross-review reuse stay as they are" (whether `first_turn` input is still the
+largest uncached share) could only be answered by joining JSON lines by hand. `finishup service
+diagnostics --reviewer-cache` prints a deterministic report of the `exchange_cache` records still in
+the diagnostics ring, for every review or, with `--request-id`, for one (`--json`:
+`reviewer-cache-report` 1.0.0; fields and rules in INTERFACES, "Reviewer cache report"). Per review
+and in total it gives the exchanges seen, duplicated and known missing, the provider-reported sums
+with how many exchanges reported each (a count no exchange reported is `null`, never 0), the cached
+share as an exact pair and floor basis points over the input of the exchanges that reported a cached
+count, the miss labels, cold and warm first turns, and the uncached input split exactly by cause.
+The split attributes only what the recorded integers show: a record keeps its first request's
+cached count but sums the rest, so an exchange of several requests has only its first request's
+shortfall attributed, and anything the integers cannot place goes to an explicit `unattributed`
+part instead of a guessed label. A malformed record is counted unreadable and adds nothing else,
+as is a record that would carry a sum past 2^53-1, the bound of every report integer, decided in
+one canonical record order; duplicates (a restarted attempt that kept its request id) are all
+summed, so record order never changes the report.
+
+The report is an owner-only CLI reading of records FinishUP already keeps. It adds no request,
+egress, retention, identifier or ledger read, and its coverage is the ring's: the ring keeps its
+newest 256 KiB, so an older review may be absent entirely, and the report says it covers only what
+the log still holds. It is not offered over MCP tools, hook events or the terminal
+interface. That decision is the same for Codex, Claude Code and Cursor, because the owner
+diagnostics command does not depend on the agent host. The `--request-id` help and INTERFACES no
+longer say the selector takes only the check request id: a review's `exchange_cache` records carry
+its first provider request id (the attempt's `provider_request_id`), which no owner surface marks as
+a review's, so the report without a selector is the documented way to find it.
+
+## Amendment — 2026-11-21: measured cost of the reply-schema change, and why review behaviour stays as it is (#1172)
+
+Status: proposed for maintainer acceptance. No behavior changes.
+
+**What was measured.** On 2026-11-21, at the maintainer's request, the reviewer's request shape was
+sent through the maintainer's own signed-in Codex CLI: codex-cli 0.171.0 `app-server`, which is not
+one of the reviewed reviewer releases (0.162.1, 0.164.0), run with its default Codex home rather
+than FinishUP's private evaluator home, so absolute token counts include that home's own additions.
+The model was `gpt-6.1-sol` at low reasoning effort, with FinishUP's launch overrides, thread and
+turn settings, the real reviewer loop instruction and strict reply schemas, and only a synthetic
+packet and synthetic read results: 8 ephemeral threads, 26 turns, each sent as soon as the previous
+one ended, one sample per shape. The figures are cached of input tokens as that run reported them
+for each turn. They are observations of one route on one day, not a provider guarantee, and they
+say nothing yet about the reviewed releases, other models or efforts, or the stateless API routes.
+
+**Observed.**
+
+- With one schema for the whole review, each later turn in every run was served from the cache at
+  least the previous turn's whole prompt rounded down to whole 128-token blocks (in two turns one
+  block less). In the one-schema run: 26,496 of 29,484, then 29,696 of 32,557, and on the final
+  turn, which adds only the `FINAL_PHASE` notice, 32,768 of 32,913.
+- A last turn that switched to the read-free schema (today's rule once the repair is spent; the
+  measured turn carried `FINAL_PHASE` and the final-phase repair note) was served 3,584 of 32,364 in
+  one run and 0 of 32,528 in a second run of the same shape, against 32,768 on the one-schema
+  run's final turn. A schema that differed from the full one only in its last bytes cost the same
+  (3,584 of 33,046), one that differed about half way through was served 0 of 26,308, and a turn
+  sent with no schema 0 of 29,356, its answer also dropping the `reply` wrapper the decoder
+  requires. Where the two schemas differ did not change the cost.
+- After a switch, a further turn under the new schema was served its whole prefix again (33,152 of
+  33,334; the loop sends no such turn, since the switch turn always ends the review), and a turn
+  that went back to an earlier schema reused what had last been sent under it (26,112 of 27,137).
+  The cache behaved as keyed by the schema together with the message prefix.
+- A fresh ephemeral thread sending a byte-identical first exchange under a minute later was served
+  0 of 26,580, and one sharing only the instruction and schema 0 of 26,046: no reuse across reviews
+  on this route, consistent with the reading in "packet order and cross-review reuse stay as they
+  are" that Codex keys a fresh thread's cache on its own id.
+- The rendered strict reply schema accounted for about 3,770 input tokens.
+
+**Decision.** As measured, within a review the request shape is already at the cache's ceiling
+while the schema stays: each turn reused the previous prompt whole. A change anywhere in the
+schema cost nearly the whole prompt in every shape measured, so on this evidence no reordering of
+the schema bytes, the messages or the notices would recover the switch turn. The one remaining
+FinishUP-caused miss is the read-free schema after a spent repair ("one reply schema per review",
+above): about one whole prompt, once, only in a review that spends its repair and reaches the
+final phase. Each way to remove it changes observable review behaviour, so none is adopted in this
+change:
+
+- *Keep the full schema and enforce "judgment only" in the loop alone.* A route that enforces the
+  schema could then end a review on a read, the regression #1173 removed.
+- *Keep the full schema and add one read-free correction turn when a read comes back.* The
+  guarantee holds, but on that path the review gains an exchange beyond today's seven (five read
+  attempts, the final judgment, one repair) and is exposed to one more turn's failures (deadline,
+  transport, provider, format); the exchanges that switch today would be approved under media type
+  `application/vnd.finishup.reviewer-turn+json`, not `…reviewer-final+json`; the Codex thread
+  would hold one more rejected answer; and whether it saves anything depends on how often a model
+  reads again after a repair, which is unmeasured.
+- *Drop the schema on that turn, or pre-warm the read-free one.* Measured above: no schema cached
+  nothing and lost the wrapper, and since the cache behaved as keyed by the schema together with
+  the message prefix, warming it would take a request carrying the whole conversation under it,
+  itself uncached.
+- *A provider cache key or reusing a thread across reviews* stays out of bounds for the reasons in
+  "packet order and cross-review reuse stay as they are", and a longer cache retention would not
+  help: the turns of one review were sent back to back, and the miss followed the schema, not time.
+
+**When to revisit.** Revisit once the reviewer cache report (`finishup service diagnostics
+--reviewer-cache`, "reviewer cache accounting keeps every exchange", above) shows over real reviews
+what share of `uncached_input.tokens` its `uncached_input.shortfall.schema_or_settings_change` part
+carries, and how often reviews pay it (`miss_labels.schema_or_settings_change` beside
+`coverage.reviews`; model and effort are constant within a review, so there the label marks the
+switch). The correction-turn design can then be weighed against that number, with the behaviour
+differences above listed in its own amendment.
 
 ## Amendment — 2026-10-21: routine correctness advisory dispositions (#1162)
 

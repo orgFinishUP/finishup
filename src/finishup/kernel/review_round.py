@@ -32,7 +32,10 @@ from finishup.domain.events import (
 )
 from finishup.domain.receipts import SEMANTIC_REVIEW_SKIPPED_PRIVACY_BLOCK_GAP
 from finishup.domain.values import FindingId
-from finishup.protocol.models import SemanticReason, SemanticStatus
+from finishup.protocol.model_values import (
+    SemanticReason,
+    SemanticStatus,
+)
 from finishup.protocol.redacted_values import SemanticRedactedValue
 
 __all__ = [

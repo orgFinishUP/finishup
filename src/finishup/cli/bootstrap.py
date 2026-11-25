@@ -18,7 +18,6 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Final, cast
 
 import typer
-from pydantic import BaseModel
 
 from finishup.cli.exits import exit_code_for
 from finishup.domain.coordination import CoordinationErrorCode
@@ -31,6 +30,7 @@ from finishup.ports.control import (
 )
 from finishup.protocol.canonical import JsonValue, canonical_encode
 from finishup.protocol.errors import SERVICE_STARTUP_PHASES, PublicErrorCode
+from finishup.protocol.lazy_module import is_pydantic_model
 from finishup.service.control_protocol import public_error_code_for_control_reason
 
 if TYPE_CHECKING:
@@ -172,7 +172,7 @@ def plain_json(value: object) -> JsonValue:
         # timestamp the wire already uses; a naive or non-UTC value stays a typed refusal
         # rather than an invented rendering (issue #731).
         return format_rfc3339_millis(value)
-    if isinstance(value, BaseModel):
+    if is_pydantic_model(value):
         return cast(JsonValue, value.model_dump(mode="json", by_alias=True, exclude_none=False))
     if dataclasses.is_dataclass(value) and not isinstance(value, type):
         return plain_json(dataclasses.asdict(value))
@@ -657,8 +657,10 @@ def control_failure(
     if code is PublicErrorCode.SERVICE_UNAVAILABLE and accepted_but_unresponsive(error):
         stderr_writer(
             _with_holder_pid(
-                "service_unavailable: a local service is listening but did not answer within "
-                "5 seconds; it may still be starting or may be wedged. Wait and retry "
+                "service_unavailable: a local service is listening but did not answer: it "
+                "stayed silent for 5 seconds, or it closed the connection, as a service that "
+                "is stopping, locking or failed does. It may also still be starting or be "
+                "wedged. Wait and retry "
                 "'finishup service status'. Do not run 'finishup service run' -- it will refuse "
                 "while that process holds the singleton; stop it with 'finishup service stop' "
                 "instead"

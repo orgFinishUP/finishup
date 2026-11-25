@@ -39,9 +39,11 @@ uv run python scripts/provision_test_instance.py create --base ~/.yz-instances -
 
 What happens, in order:
 
-1. The exact revision is resolved (`--revision` defaults to `HEAD`). A modified working tree is
-   refused unless you pass `--allow-dirty`, which records `source_state: modified`; a non-HEAD
-   revision is exported with `git archive` and built from that clean tree.
+1. The exact revision is resolved (`--revision` defaults to `HEAD`) and exported with
+   `git archive`; the wheel is built from that clean tree, so untracked or ignored files in the
+   checkout never reach it, even for `HEAD`. A working tree whose tracked files differ from `HEAD`
+   is refused unless you pass `--allow-dirty`, which builds the working tree as it stands
+   (untracked and ignored files included) and records `source_state: modified`.
 2. `uv build --no-sources` produces the wheel into `<base>/<tag>/dist/`; its SHA-256 becomes the
    instance's `package_digest`.
 3. `uv venv` plus `uv pip install <wheel>` creates `<base>/<tag>/runtime/`, a runtime holding
@@ -345,7 +347,10 @@ state and the pin. The script works in four steps:
    is stopped. If it refuses, the launchers are put back and nothing has changed.
 3. **Remove the root.** The runtime's own `dispose_instance` probes the root's singleton lock,
    sends the stamped holder (and nothing else) a bounded stop, waits up to the drain window,
-   optionally copies the log files to `<retain>/<installation_id>/`, and removes the root. It
+   optionally copies the log files to `<retain>/<installation_id>/`, and removes the root. Before
+   it stops anything, it refuses a retain folder inside the root, with no existing parent, or
+   already holding these logs (`instance_root_invalid`), so a direct `finishup instance dispose`
+   enforces the same retain rules as step 1. It
    keeps the pin, which therefore names a removed root, and a pinned runtime in that state fails
    closed (`isolation_root_invalid`), never ambient.
    - **A typed refusal** comes before anything is deleted, for example `instance_service_running`
@@ -438,13 +443,14 @@ work roots and names that cause.
 
 What the corpus holds:
 
-- Codex callbacks are rebuilt from a rollout, in the shapes pinned by
-  `fixtures/observations/codex-post-tool-outcomes-0.157.1.case.json`. Each callback fires at the
-  rollout position where its call or output landed, and its `transcript_path` names a copy of the
-  rollout that has grown to that point. Stop fires after the turn's final reply and carries it as
+- Codex callbacks are rebuilt from the first turn of a rollout, in the shapes pinned by
+  `fixtures/observations/codex-post-tool-outcomes-0.157.1.case.json`; calls from later turns are
+  left out and never count against `--max-calls`. Each callback fires at the rollout position
+  where its call or output landed, and its `transcript_path` names a copy of the rollout that has
+  grown to that point. Stop fires after the turn's final reply and carries it as
   `last_assistant_message`, as Codex sends it (the hook no longer reads it, ADR-033 D1); when
   `--max-calls` cuts the turn short, Stop fires right after the last selected output instead, so
-  give `--max-calls` at least the turn's replayed call count for the proof.
+  give `--max-calls` at least the first turn's replayed call count for the proof.
 - Claude Code and Cursor sessions use the ordinary profiles, built from the repository's recorded
   shapes.
 - Malformed stdin for each host, invalid workflow requests through the CLI, and schema-validation

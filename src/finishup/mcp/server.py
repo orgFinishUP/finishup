@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import gc
 import os
 import re
 import stat
@@ -114,6 +115,7 @@ from finishup.mcp.status_streak import (
     status_streak_nudge,
 )
 from finishup.mcp.summaries import (
+    prevalidated_wire,
     render_check_reviewer_output,
     render_publish_action_notices,
     render_publish_blocker_notices,
@@ -137,6 +139,7 @@ from finishup.ports.control import (
 from finishup.ports.integrations import FINISHUP_MCP_TOOL_NAMES
 from finishup.protocol.canonical import JsonValue, canonical_encode
 from finishup.protocol.consent import CONSENT_PENDING_TTL_SECONDS
+from finishup.protocol.deferred_build import build_deferred_models
 from finishup.protocol.errors import (
     AUTHORIZATION_REFUSAL_PHASES,
     SERVICE_STARTUP_PHASES,
@@ -580,6 +583,14 @@ class _ClientSlot:
     retirement_generation: int = 0
 
 
+@dataclass(slots=True)
+class _ToolListCache:
+    """The advertised tools/list inventory, built once for one exact descriptor tuple."""
+
+    descriptors: tuple[ToolDescriptor, ...] | None = None
+    tools: tuple[types.Tool, ...] = ()
+
+
 @dataclass(frozen=True, slots=True)
 class BridgeRuntime:
     """Verified static surface plus one private, initially empty ordinary-client slot."""
@@ -614,6 +625,11 @@ class BridgeRuntime:
     # so an identical id-less resend is refused with an explicit choice instead of guessed.
     publish_guard: PublishRepeatGuard = field(
         default_factory=PublishRepeatGuard, repr=False, compare=False
+    )
+    # The descriptors and their presentation schemas are static for the process, so tools/list
+    # builds its Tool objects once. Not an init field: ``replace`` never carries a stale list.
+    _tool_list: _ToolListCache = field(
+        default_factory=_ToolListCache, init=False, repr=False, compare=False
     )
 
 
@@ -1595,51 +1611,56 @@ def _result_text(
             return canonical_encode(cast(JsonValue, dict(wire))).decode("utf-8")
         except Exception as exc:  # noqa: BLE001 - fall back to the bounded summary below
             failures.append(("cursor.canonical_json", exc))
-    # The host profile no longer changes any summary text (ADR-033 D1 retired the acceptance
-    # re-read, whose answer differed per host); it is still passed for the render context.
-    rendered = render_safe_compact_summary_detailed(wire, host=host_profile)
-    failures.extend(rendered.failures)
-    compact = rendered.text
-    if wire.get("preparatory_only") is True:
-        parts: tuple[str, ...] = (compact,)
-    else:
-        awaiting = _guarded_text("awaiting", lambda: summary_for_check_awaiting(wire), failures)
-        if awaiting:
-            # A paused check has no verdict; its continuation is the only actionable fact, so it
-            # leads.
-            compact = f"{awaiting}\n{compact}" if compact else awaiting
-        reviewer = _guarded_text(
-            "reviewer_output", lambda: render_check_reviewer_output(wire), failures
-        )
-        totals = _guarded_text("totals", lambda: render_check_totals(wire.get("totals")), failures)
-        manifest = _guarded_text(
-            "manifest",
-            lambda: render_review_input_manifest_compact(wire.get("review_input_manifest")),
-            failures,
-        )
-        if manifest and manifest in compact:
-            manifest = ""
-        # #985: a publish result's fixed finishup-blocker challenge reaches the model, dry runs
-        # included.
-        blocker_notices = _guarded_text(
-            "blocker_notices", lambda: render_publish_blocker_notices(wire), failures
-        )
-        # tb4n5 follow-up: an action the batch recorded with no result naming it, dry runs included.
-        action_notices = _guarded_text(
-            "action_notices", lambda: render_publish_action_notices(wire), failures
-        )
-        # #1139: the counted ledger line leads, ahead of reviewer prose (re-gated: fixed words,
-        # counts and service-minted ids only).
-        status_line = safe_status_line(wire.get("agent_status_line"))
-        parts = (
-            status_line,
-            reviewer,
-            compact,
-            totals,
-            manifest,
-            blocker_notices,
-            action_notices,
-        )
+    # Every section below reads the same body: check it against the canonical profile once.
+    with prevalidated_wire(wire):
+        # The host profile no longer changes any summary text (ADR-033 D1 retired the acceptance
+        # re-read, whose answer differed per host); it is still passed for the render context.
+        rendered = render_safe_compact_summary_detailed(wire, host=host_profile)
+        failures.extend(rendered.failures)
+        compact = rendered.text
+        if wire.get("preparatory_only") is True:
+            parts: tuple[str, ...] = (compact,)
+        else:
+            awaiting = _guarded_text("awaiting", lambda: summary_for_check_awaiting(wire), failures)
+            if awaiting:
+                # A paused check has no verdict; its continuation is the only actionable fact, so it
+                # leads.
+                compact = f"{awaiting}\n{compact}" if compact else awaiting
+            reviewer = _guarded_text(
+                "reviewer_output", lambda: render_check_reviewer_output(wire), failures
+            )
+            totals = _guarded_text(
+                "totals", lambda: render_check_totals(wire.get("totals")), failures
+            )
+            manifest = _guarded_text(
+                "manifest",
+                lambda: render_review_input_manifest_compact(wire.get("review_input_manifest")),
+                failures,
+            )
+            if manifest and manifest in compact:
+                manifest = ""
+            # #985: a publish result's fixed finishup-blocker challenge reaches the model, dry runs
+            # included.
+            blocker_notices = _guarded_text(
+                "blocker_notices", lambda: render_publish_blocker_notices(wire), failures
+            )
+            # tb4n5 follow-up: an action the batch recorded with no result naming it,
+            # dry runs included.
+            action_notices = _guarded_text(
+                "action_notices", lambda: render_publish_action_notices(wire), failures
+            )
+            # #1139: the counted ledger line leads, ahead of reviewer prose (re-gated: fixed words,
+            # counts and service-minted ids only).
+            status_line = safe_status_line(wire.get("agent_status_line"))
+            parts = (
+                status_line,
+                reviewer,
+                compact,
+                totals,
+                manifest,
+                blocker_notices,
+                action_notices,
+            )
     note = (
         _record_summary_degradation(failures, request_id=request_id, operation=operation)
         if failures
@@ -2645,19 +2666,22 @@ def _control_error_result(
                 diagnostic_reason="service_unavailable",
             )
         if accepted_but_unresponsive(error):
-            # A listener that accepted and then went silent is running. Prescribing
-            # `finishup service run` here sent an operator to a command that must refuse (#237).
+            # A listener that accepted and then went silent, or a service of this installation
+            # that closed the connection while stopping, locking or failed, is running.
+            # Prescribing `finishup service run` here sent an operator to a command that must
+            # refuse (#237).
             return _control_public_error_result(
                 error,
                 request_id,
                 operation,
                 code=PublicErrorCode.SERVICE_UNAVAILABLE,
                 message=(
-                    "The local FinishUP service is listening but did not answer. Wait and retry; on a "
-                    "local terminal run `finishup service status`. Do not run `finishup service run` — "
-                    "it will refuse while that process holds the singleton. If it is wedged, stop "
-                    "it with `finishup service stop`, then retry this operation with the same "
-                    "request_id."
+                    "The local FinishUP service is listening but did not answer: it stayed "
+                    "silent, or it closed the connection, as a service that is stopping, locking "
+                    "or failed does. Wait and retry; on a local terminal run `finishup service "
+                    "status`. Do not run `finishup service run` — it will refuse while that "
+                    "process holds the singleton. If it is wedged, stop it with `finishup service "
+                    "stop`, then retry this operation with the same request_id."
                 ),
                 retryable=True,
                 host_profile=host_profile,
@@ -4851,7 +4875,15 @@ def _guidance_text(
 async def list_tools(runtime: BridgeRuntime = BRIDGE_RUNTIME) -> list[types.Tool]:
     """Return the exact reviewed tool inventory in stable order."""
 
-    return [
+    cache = runtime._tool_list  # pyright: ignore[reportPrivateUsage]
+    if cache.descriptors is not runtime.descriptors:
+        cache.tools = _build_tool_list(runtime.descriptors)
+        cache.descriptors = runtime.descriptors
+    return list(cache.tools)
+
+
+def _build_tool_list(descriptors: Sequence[ToolDescriptor]) -> tuple[types.Tool, ...]:
+    return tuple(
         types.Tool(
             name=descriptor.name,
             title=descriptor.title,
@@ -4866,8 +4898,8 @@ async def list_tools(runtime: BridgeRuntime = BRIDGE_RUNTIME) -> list[types.Tool
                 openWorldHint=descriptor.annotations.open_world,
             ),
         )
-        for descriptor in runtime.descriptors
-    ]
+        for descriptor in descriptors
+    )
 
 
 async def call_tool(
@@ -5287,6 +5319,14 @@ def main(
         isolation_root=registration_isolation_root,
     )
     record_startup_route_drift(runtime.route_profile, host_profile=runtime.host_profile)
+    # The long-lived bridge builds every protocol and config model before serving, as an
+    # import-time build did, so no tool call pays a first-use model build.
+    build_deferred_models()
+    if not gc.isenabled():
+        # The CLI entry disables cyclic collection for bridge startup. Move the startup heap to
+        # the permanent generation without collecting it, so later passes never rescan it.
+        gc.freeze()
+        gc.enable()
     anyio.run(
         run_stdio,
         runtime,

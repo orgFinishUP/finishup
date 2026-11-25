@@ -52,6 +52,7 @@ __all__ = [
     "heredoc_patch_paths",
     "heredoc_patch_writes",
     "patch_command_words",
+    "shell_command_segments",
     "shell_command_text",
     "shell_heredocs",
     "shell_write_paths",
@@ -364,35 +365,59 @@ def _starts_word(text: str, index: int, start: int) -> bool:
     return before in " \t\n;&|("
 
 
+class _HeredocEnd:
+    """Bash's rule for the line that closes one heredoc body, fed one physical line at a time.
+
+    A body is data to the first line equal to its delimiter (a ``<<-`` body also ignores leading
+    tabs, and only tabs: never spaces, so a unified-diff context line `` EOF`` is data). In an
+    unquoted heredoc a line ending in an odd number of backslashes continues on the next, and the
+    joined line is what is compared (``text\\`` then ``EOF`` is ``textEOF``). Both the token lexer
+    (``_skip_heredocs``) and the heredoc patch reader (``_heredocs``) end a body here.
+    """
+
+    __slots__ = ("_carry", "_dead", "_delimiter", "_quoted", "_strip_tabs")
+
+    def __init__(self, delimiter: str, *, strip_tabs: bool, quoted: bool) -> None:
+        self._delimiter = delimiter
+        self._strip_tabs = strip_tabs
+        self._quoted = quoted
+        self._carry = ""  # the continued lines so far, while they could still equal the delimiter
+        self._dead = False  # ... and once they cannot
+
+    def closes(self, physical: str) -> bool:
+        """Whether *physical* (one line, no newline) closes the body."""
+
+        if not self._quoted and (len(physical) - len(physical.rstrip("\\"))) % 2 == 1:
+            if not self._dead:
+                self._carry += physical[:-1]
+                if len(self._carry.lstrip("\t")) > len(self._delimiter):
+                    self._carry, self._dead = "", True
+            return False
+        line = self._carry + physical
+        matched = not self._dead and (
+            (line.lstrip("\t") if self._strip_tabs else line) == self._delimiter
+        )
+        self._carry, self._dead = "", False
+        return matched
+
+
 def _skip_heredocs(text: str, index: int, pending: list[tuple[str, bool, bool]]) -> int:
     """The index after the bodies of the heredocs started on the line that just ended.
 
-    A body is data to the first line equal to its delimiter (a ``<<-`` body also ignores leading
-    tabs, and only tabs); an unterminated body runs to the end of the text, as in bash. In an
-    unquoted heredoc a line ending in an odd number of backslashes continues on the next, and the
-    joined line is what is compared (``text\\`` then ``EOF`` is ``textEOF``).
+    Each body ends at its closing line (``_HeredocEnd``); an unterminated body runs to the end of
+    the text, as in bash.
     """
 
     size = len(text)
     for delimiter, strip_tabs, quoted in pending:
-        carry = ""  # the continued lines so far, while they could still equal the delimiter
-        dead = False  # ... and once they cannot
+        end_rule = _HeredocEnd(delimiter, strip_tabs=strip_tabs, quoted=quoted)
         while index < size:
             end = text.find("\n", index)
             if end < 0:
                 end = size
             physical = text[index:end]
             index = min(end + 1, size)
-            if not quoted and (len(physical) - len(physical.rstrip("\\"))) % 2 == 1:
-                if not dead:
-                    carry += physical[:-1]
-                    if len(carry.lstrip("\t")) > len(delimiter):
-                        carry, dead = "", True
-                continue
-            line = carry + physical
-            matched = not dead and (line.lstrip("\t") if strip_tabs else line) == delimiter
-            carry, dead = "", False
-            if matched:
+            if end_rule.closes(physical):
                 break
     return index
 
@@ -957,6 +982,61 @@ def shell_write_paths(command: str) -> list[str]:
     return list(_write_targets(command))
 
 
+def shell_command_segments(command: str) -> list[list[str]]:
+    """The words of each simple command in *command*, as this module's lexer reads them.
+
+    The same segments the write reader scans (#1434): an unquoted newline ends a command as
+    ``;``, ``&&``, ``||``, ``|``, ``|&`` and ``&`` do, while a quoted or backslash-escaped newline,
+    a comment and a heredoc body are data. Words lose their quotes; a redirection and its operand
+    (a target, a source, a heredoc delimiter) are not words of the command. Text is read up to
+    ``MAX_SHELL_WRITE_CHARS`` (``bound_command``); a command the bound cuts short is dropped, and
+    text the lexer cannot read with certainty has no segments. An unquoted word that ends in a
+    command substitution (``echo $(pip install x)``, ``v="$(pip install x)"``) also contributes
+    the segments of the command it runs, a bounded number of levels deep.
+    """
+
+    text, cut = _bounded(command)
+    return _command_segments(text, partial=cut, depth=0)
+
+
+_MAX_SUBSTITUTION_DEPTH: Final = 3
+
+
+def _command_segments(text: str, *, partial: bool, depth: int) -> list[list[str]]:
+    lexed = _lex(text, partial=partial)
+    if lexed is None:
+        return []
+    tokens, incomplete = lexed
+    # Each segment's words, then the segments of the substitutions it runs.
+    segments: list[tuple[list[str], list[list[str]]]] = [([], [])]
+    operand = False
+    for token in tokens:
+        if token.kind == "op" and token.text in _SEPARATORS:
+            segments.append(([], []))
+            operand = False
+        elif token.kind == "op":
+            operand = True  # a redirection: its next word is its operand
+        elif operand:
+            operand = False
+        else:
+            words, substituted = segments[-1]
+            words.append(token.text)
+            start = token.text.find("$(")
+            if (
+                not token.literal
+                and start >= 0
+                and token.text.endswith(")")
+                and depth < _MAX_SUBSTITUTION_DEPTH
+            ):
+                inner = token.text[start + 2 : -1]
+                substituted.extend(_command_segments(inner, partial=False, depth=depth + 1))
+    if incomplete:
+        segments.pop()
+    return [words for words, _ in segments if words] + [
+        segment for _, substituted in segments for segment in substituted
+    ]
+
+
 def shell_write_scope(
     command: str,
     *,
@@ -1210,15 +1290,17 @@ def _text_changes_directory(text: str) -> bool:
 
 
 def _without_heredoc_bodies(command: str, start: int) -> str:
-    """*command* from *start* on, less the body and closing lines of its complete heredocs.
+    """*command* from *start* on, less the body and closing lines of its heredocs.
 
-    The same bodies the heredoc patch reader reads as the patch (``_heredocs``), so a long patch
-    whose added lines say ``cd`` changes no directory.
+    The same bodies the heredoc patch reader reads as the patch (``_heredoc_scan``: each complete
+    heredoc, and a patch heredoc whose closing line bash does not accept, to the end of the
+    text), so a long patch whose added lines say ``cd`` changes no directory.
     """
 
     lines = command.split("\n")
     skipped: set[int] = set()
-    for heredoc in _heredocs(command):
+    found, _unread, unclosed = _heredoc_scan(command)
+    for heredoc in _in_command_order(found, unclosed):
         skipped.update(range(heredoc.start + 1, heredoc.end + 1))
     kept: list[str] = []
     offset = 0
@@ -1229,7 +1311,7 @@ def _without_heredoc_bodies(command: str, start: int) -> str:
     return "\n".join(kept)
 
 
-def shell_command_text(value: object) -> str | None:
+def shell_command_text(value: object, *, ran: bool = False) -> str | None:
     """The shell text a command value runs, for the write readers (#1106 r2).
 
     A string is itself. A native argv is its script when it is one host-shell layer
@@ -1237,6 +1319,10 @@ def shell_command_text(value: object) -> str | None:
     ``shell`` call records), so a long heredoc patch is read from the script itself rather than
     from a joined copy the token parsers cut at ``MAX_SHELL_WRITE_CHARS``; any other argv is
     its ``shlex.join``. Anything else is ``None``.
+
+    A noexec layer (``["bash", "-nc", SCRIPT]``) reads SCRIPT and runs none of it. The write
+    readers still get SCRIPT: they ask what it could do. A reader that asks what happened (the
+    install reader) passes ``ran`` and gets the joined argv, in which no command of SCRIPT runs.
     """
 
     if type(value) is str:
@@ -1245,7 +1331,7 @@ def shell_command_text(value: object) -> str | None:
         words = cast(Sequence[object], value)
         if all(type(word) is str for word in words):
             argv = [cast(str, word) for word in words]
-            script = wrapped_shell_argument(argv)
+            script = wrapped_shell_argument(argv, ran=ran)
             return script if script is not None else shlex.join(argv)
     return None
 
@@ -1272,7 +1358,6 @@ def _placed_docs_class(
 
 
 # A heredoc that feeds a patch tool writes the files the patch names, which no shell token shows.
-_HEREDOC_START: Final = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
 # A heredoc fed to ``apply_patch``: the line before ``<<`` ends in the command name.
 SHELL_APPLY_PATCH: Final = re.compile(r"(?:^|[\s;&|(])(?:apply_patch|applypatch)\s*$")
 APPLY_PATCH_PATH: Final = re.compile(
@@ -1372,37 +1457,131 @@ class _Heredoc(NamedTuple):
     end: int  # the index of the closing delimiter line
 
 
-def _heredocs(command: str) -> list[_Heredoc]:
+class _HeredocStart(NamedTuple):
+    operator: int  # where ``<<`` starts in the line
+    end: int  # just after the delimiter word, or after ``<<`` when it has none it can read
+    delimiter: tuple[str, bool, bool] | None  # ``_heredoc_delimiter``'s, ``None`` if unreadable
+
+
+def _heredoc_start(line: str, offset: int) -> _HeredocStart | None:
+    """The first heredoc operator (``<<``/``<<-``, never a ``<<<`` here-string) in *line*.
+
+    Searched from *offset*. Its delimiter is read by the token lexer's rule
+    (``_heredoc_delimiter``): the word after the operator, quotes and backslash escapes removed,
+    so ``<<\\EOF``, ``<<'END-PATCH'`` and ``<<"END PATCH"`` are heredocs as in bash.
+    """
+
+    index = line.find("<<", offset)
+    while index >= 0 and line.startswith("<<<", index):
+        index = line.find("<<", index + 3)
+    if index < 0:
+        return None
+    parsed = _heredoc_delimiter(line, index + 2)
+    if parsed is None:
+        return _HeredocStart(index, index + 2, None)
+    delimiter, end = parsed
+    return _HeredocStart(index, end, delimiter)
+
+
+def _heredoc_scan(command: str) -> tuple[list[_Heredoc], list[str], _Heredoc | None]:
+    """``(complete, unread, unclosed)``: the heredocs of *command* that close, the prefixes of
+    ``<<`` it cannot read, and the first patch heredoc whose closing line bash does not accept.
+
+    A delimiter the reader cannot read (``$'E\\x4fF'``, an unclosed quote) leaves its body's end
+    unknown; its prefix lets a patch tool it feeds count as unplaced. A ``<<`` whose body never
+    closes (an arithmetic ``1<<2``, or text in quotes) is passed over for the next one, a bounded
+    number of times, so a patch after it is still read.
+
+    A ``<<`` that never closes is still read as a heredoc when two things hold: a later line is
+    its delimiter but for blanks around it (a trailing blank, an indent without ``<<-``, a stray
+    carriage return), and it feeds a patch tool that writes (``_feeds_patch_tool``). Bash does
+    not accept that line; it warns that the heredoc is not closed and gives the tool every line
+    to the end of the script, so the patch is still applied. The first such heredoc is returned
+    with every line after its own as its ``body`` and the last line as its ``end``; a later one
+    lies inside that body.
+    """
+
     lines = command.split("\n")
     found: list[_Heredoc] = []
+    unread: list[str] = []
+    unclosed: _Heredoc | None = None
+    misses = 0
     index = 0
     while index < len(lines) and len(found) < _MAX_SHELL_HEREDOCS:
         line = lines[index]
         start = index
-        match = _HEREDOC_START.search(line)
         index += 1
-        if match is None:
-            continue
-        delimiter = match.group(2)
-        body: list[str] = []
-        while index < len(lines) and lines[index].strip() != delimiter:
-            body.append(lines[index])
-            index += 1
-        if index >= len(lines):
-            break  # unterminated heredoc: not a complete edit
-        found.append(
-            _Heredoc(
-                line[: match.start()], line[match.end() :], "\n".join(body) + "\n", start, index
-            )
-        )
-        index += 1
-    return found
+        offset = 0
+        while (opened := _heredoc_start(line, offset)) is not None:
+            offset = opened.end
+            if opened.delimiter is None:
+                if len(unread) < _MAX_SHELL_HEREDOCS:
+                    unread.append(line[: opened.operator])
+                break  # an unclosed quote runs to the end of the line
+            delimiter, strip_tabs, quoted = opened.delimiter
+            end_rule = _HeredocEnd(delimiter, strip_tabs=strip_tabs, quoted=quoted)
+            close = start + 1
+            while close < len(lines) and not end_rule.closes(lines[close]):
+                close += 1
+            if close < len(lines):
+                body = "\n".join(lines[start + 1 : close]) + "\n"
+                found.append(
+                    _Heredoc(line[: opened.operator], line[opened.end :], body, start, close)
+                )
+                index = close + 1
+                break
+            misses += 1  # unterminated: not a complete edit, and maybe not a heredoc at all
+            if (
+                unclosed is None
+                and _feeds_patch_tool(line[: opened.operator])
+                and _has_padded_closing_line(lines, start + 1, delimiter)
+            ):
+                rest = "\n".join(lines[start + 1 :])
+                if not rest.endswith("\n"):
+                    rest += "\n"  # bash ends the last line of a body the script's end cuts
+                unclosed = _Heredoc(
+                    line[: opened.operator], line[opened.end :], rest, start, len(lines) - 1
+                )
+            if misses > _MAX_SHELL_HEREDOCS:
+                return found, unread, unclosed
+    return found, unread, unclosed
+
+
+def _has_padded_closing_line(lines: list[str], first: int, delimiter: str) -> bool:
+    """Whether a line from *first* on is *delimiter* but for the blanks around either."""
+
+    closing = delimiter.strip()
+    return any(lines[index].strip() == closing for index in range(first, len(lines)))
+
+
+def _feeds_patch_tool(prefix: str) -> bool:
+    """Whether the text before a ``<<`` ends in a patch tool that writes what it is fed."""
+
+    return SHELL_APPLY_PATCH.search(prefix) is not None or _diff_patch_strip(prefix) is not None
+
+
+def _in_command_order(found: list[_Heredoc], unclosed: _Heredoc | None) -> list[_Heredoc]:
+    if unclosed is None:
+        return found
+    return sorted([*found, unclosed], key=lambda heredoc: heredoc.start)
+
+
+def _heredocs(command: str) -> list[_Heredoc]:
+    return _heredoc_scan(command)[0]
 
 
 def shell_heredocs(command: str) -> list[tuple[str, str, str]]:
-    """Return bounded ``(prefix, suffix, body)`` triples for each complete heredoc in a command."""
+    """Return bounded ``(prefix, suffix, body)`` triples for each heredoc in a command.
 
-    return [(heredoc.prefix, heredoc.suffix, heredoc.body) for heredoc in _heredocs(command)]
+    In command order: each complete heredoc, and the first patch heredoc whose closing line bash
+    does not accept, whose body runs to the end of the command as in bash (``_heredoc_scan``).
+    """
+
+    found, _unread, unclosed = _heredoc_scan(command)
+    return [
+        (heredoc.prefix, heredoc.suffix, heredoc.body)
+        for heredoc in _in_command_order(found, unclosed)
+    ]
 
 
 def codex_intercepts_shell_apply_patch(command: str) -> bool:
@@ -1443,7 +1622,10 @@ def heredoc_patch_writes(command: str) -> HeredocPatchWrites:
     """The files a heredoc-fed patch in a shell command writes (n7 RC2, #1046 review, #1106 r3).
 
     The command's own tokens show no write for these, so the patch headers are the write. Three
-    forms, each only from a complete heredoc: ``apply_patch``/``applypatch`` (its ``*** Add|
+    forms, each from a complete heredoc, or from one whose only closing line is one bash does
+    not accept (blanks around the delimiter): its body is then the rest of the command, which
+    bash still feeds to the tool (``_heredoc_scan``). A ``<<`` with no closing line of either
+    kind names nothing. The forms: ``apply_patch``/``applypatch`` (its ``*** Add|
     Update|Delete File:`` and ``*** Move to:`` headers), and ``git apply`` and ``patch`` (each
     unified-diff ``---``/``+++`` header pair, both its paths but ``/dev/null``, less the leading
     components the ``-p`` strip removes: ``git apply`` defaults to one, a bare ``patch`` drops one
@@ -1464,14 +1646,16 @@ def heredoc_patch_writes(command: str) -> HeredocPatchWrites:
 
     if "<<" not in command:
         return HeredocPatchWrites((), False)
-    found = _heredoc_patch_writes(command)
-    if found.paths or found.unplaced:
+    found, to_the_end = _heredoc_patch_writes(command)
+    if (found.paths or found.unplaced) and not to_the_end:
         return found
     # A native argv joined into one string (``/bin/bash -lc 'git apply <<EOF ...'``, the shape a
     # Codex ``CommandExecution`` item or a legacy ``shell`` call records): the heredoc sits inside
-    # the quoted script, so read that script once, as ``shell_write_scope`` does.
+    # the quoted script, so read that script once, as ``shell_write_scope`` does. A heredoc the
+    # joined copy leaves open (its quoting changed the delimiter or the closing line) may close
+    # in the script, so the script's own reading replaces one that ran to the end of the copy.
     script = _wrapped_script(command)
-    return _heredoc_patch_writes(script) if script is not None else found
+    return _heredoc_patch_writes(script)[0] if script is not None else found
 
 
 def _wrapped_script(command: str) -> str | None:
@@ -1488,10 +1672,20 @@ def _wrapped_script(command: str) -> str | None:
     return wrapped_shell_argument(words)
 
 
-def _heredoc_patch_writes(command: str) -> HeredocPatchWrites:
+def _heredoc_patch_writes(command: str) -> tuple[HeredocPatchWrites, bool]:
+    """``(writes, to_the_end)``: *to_the_end* says a heredoc was read to the end of the text."""
+
     paths: list[str] = []
-    unplaced = False
-    for heredoc in _heredocs(command):
+    found, unread, unclosed = _heredoc_scan(command)
+    # A patch tool fed a heredoc whose delimiter the reader cannot read still applies a patch.
+    unplaced = any(
+        SHELL_APPLY_PATCH.search(prefix) or _diff_patch_strip(prefix) is not None
+        for prefix in unread
+    )
+    # ... and so does one fed a heredoc whose closing line bash does not accept: its patch is
+    # the rest of the script, which may hold a later heredoc's patch too, so each path is named
+    # once.
+    for heredoc in _in_command_order(found, unclosed):
         if SHELL_APPLY_PATCH.search(heredoc.prefix):
             paths.extend(match.strip() for match in APPLY_PATCH_PATH.findall(heredoc.body))
             continue
@@ -1504,7 +1698,8 @@ def _heredoc_patch_writes(command: str) -> HeredocPatchWrites:
         named, unread = _diff_paths(heredoc.body, strip)
         paths.extend(named)
         unplaced = unplaced or unread or not named
-    return HeredocPatchWrites(tuple(path for path in paths if path), unplaced)
+    named_once = tuple(dict.fromkeys(path for path in paths if path))
+    return HeredocPatchWrites(named_once, unplaced), unclosed is not None
 
 
 def _diff_patch_strip(prefix: str) -> int | None:

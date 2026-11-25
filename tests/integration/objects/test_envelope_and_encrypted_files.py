@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import gc
 import hashlib
 import hmac
 import json
@@ -28,6 +29,7 @@ from finishup.adapters.objects.envelope import (
     decode_object_envelope,
     encode_object_envelope,
 )
+from finishup.application.projects import EncryptedProjectTextStore
 from finishup.ports.keys import BundleKeys, WrappedDek
 from finishup.ports.objects import (
     OBJECT_COMMITMENT_DOMAINS,
@@ -582,3 +584,103 @@ def test_erasure_primitives_list_describe_and_delete_only_the_exact_object(
     with pytest.raises(ValueError, match="object_verification_failed"):
         asyncio.run(store.resolve_verified(erased.object_id, erased.envelope_digest))
     assert asyncio.run(store.describe_published(kept.object_id)) == kept
+
+
+_RESERVED_OBJECT_ID = "obj_7a000000-0000-4000-8000-000000000002"
+_PROJECT_ID = "prj_7a000000-0000-4000-8000-000000000003"
+
+
+class _ClockForObjectTest:
+    def __init__(self, now: datetime) -> None:
+        self._now = now
+
+    def now_utc(self) -> datetime:
+        return self._now
+
+    def monotonic_seconds(self) -> float:
+        return 0.0
+
+
+def _stage_and_lose(tmp_path: Path, now: datetime, data: bytes) -> None:
+    """Stage a reserved id and drop every owner before finalize, as a killed service does."""
+
+    store = object_store(tmp_path, now)
+    metadata = ObjectMetadata(ObjectKind.PROJECT_TEXT, "text/plain", _TASK_ID, now)
+    asyncio.run(store.stage(ObjectSource(data=data), metadata, object_id=_RESERVED_OBJECT_ID))
+    del store
+    gc.collect()
+
+
+def test_reserved_project_text_retry_reclaims_the_temp_a_dead_attempt_left(
+    tmp_path: Path,
+) -> None:
+    """A retry with the persisted reserved id completes after a kill between stage and finalize."""
+
+    now = datetime(2026, 3, 4, 5, 6, 7, tzinfo=UTC)
+    staging_root = tmp_path / "objects" / ".staging"
+    _stage_and_lose(tmp_path, now, b"My title")
+    (dead_temp,) = tuple(staging_root.glob(f"{_RESERVED_OBJECT_ID}.*.tmp"))
+
+    restarted = object_store(tmp_path, now)
+    text = EncryptedProjectTextStore(restarted, clock=_ClockForObjectTest(now))
+    ref = asyncio.run(
+        text.put(
+            _PROJECT_ID,
+            "title",
+            "My title",
+            owner_task_id=_TASK_ID,
+            route_generation=1,
+            reserved_object_id=_RESERVED_OBJECT_ID,
+        )
+    )
+
+    assert ref.object_id == _RESERVED_OBJECT_ID
+    assert asyncio.run(text.read(ref)) == "My title"
+    assert not dead_temp.exists()
+    assert not tuple(staging_root.iterdir())
+
+
+def test_reserved_stage_still_refuses_a_temp_a_live_stage_owns(tmp_path: Path) -> None:
+    now = datetime(2026, 3, 4, 5, 6, 7, tzinfo=UTC)
+    metadata = ObjectMetadata(ObjectKind.PROJECT_TEXT, "text/plain", _TASK_ID, now)
+    owner = object_store(tmp_path, now)
+    live = asyncio.run(
+        owner.stage(ObjectSource(data=b"title"), metadata, object_id=_RESERVED_OBJECT_ID)
+    )
+    staging_root = tmp_path / "objects" / ".staging"
+    (live_temp,) = tuple(staging_root.glob(f"{_RESERVED_OBJECT_ID}.*.tmp"))
+
+    for contender in (owner, object_store(tmp_path, now)):
+        with pytest.raises(OSError, match="object_destination_collision"):
+            asyncio.run(
+                contender.stage(
+                    ObjectSource(data=b"title"), metadata, object_id=_RESERVED_OBJECT_ID
+                )
+            )
+    assert live_temp.exists()
+    ref = asyncio.run(owner.finalize(live))
+    assert asyncio.run(owner.resolve_verified(ref.object_id, ref.envelope_digest)) == ref
+
+
+def test_reserved_stage_never_reclaims_an_unsafe_staging_entry(tmp_path: Path) -> None:
+    now = datetime(2026, 3, 4, 5, 6, 7, tzinfo=UTC)
+    metadata = ObjectMetadata(ObjectKind.PROJECT_TEXT, "text/plain", _TASK_ID, now)
+    store = object_store(tmp_path, now)
+    staging_root = tmp_path / "objects" / ".staging"
+    staging_root.parent.mkdir(mode=0o700)
+    staging_root.mkdir(mode=0o700)
+    target = tmp_path / "elsewhere"
+    target.write_bytes(b"not an object")
+    link = staging_root / f"{_RESERVED_OBJECT_ID}.{'0' * 32}.tmp"
+    link.symlink_to(target)
+    loose = staging_root / f"{_RESERVED_OBJECT_ID}.loose.tmp"
+    loose.write_bytes(b"x")
+    loose.chmod(0o600)
+
+    with pytest.raises(OSError, match="object_destination_collision"):
+        asyncio.run(
+            store.stage(ObjectSource(data=b"title"), metadata, object_id=_RESERVED_OBJECT_ID)
+        )
+    assert link.is_symlink()
+    assert loose.exists()
+    assert target.read_bytes() == b"not an object"

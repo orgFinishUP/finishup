@@ -313,3 +313,56 @@ def test_nudge_follows_the_agent_actionable_order() -> None:
     assert "Next: call respond" in status_streak_nudge(first_findings, 3)
     first_check = _obligations_wire(actionable=("check_not_recorded", "findings_unanswered"))
     assert "Next: call check." in status_streak_nudge(first_check, 3)
+
+
+def test_an_inspection_check_is_a_read_that_neither_counts_nor_resets() -> None:
+    """ADR-047: ``check`` with ``mode: inspect`` is a read, so it does not end the streak."""
+
+    streaks = StatusReadStreaks()
+    assert streaks.note_call("status", _status_args()) == 1
+    assert streaks.note_call("status", _status_args()) == 2
+    inspect = {"session_id": _SESSION, "mode": "inspect"}
+    assert streaks.note_call("check", inspect) == 0
+    assert streaks.note_call("status", _status_args()) == 3
+    # A recording check (any other mode, or none) is still a write that resets.
+    assert streaks.note_call("check", {"session_id": _SESSION, "mode": "deterministic_only"}) == 0
+    assert streaks.note_call("status", _status_args()) == 1
+
+
+@pytest.mark.parametrize("mode", [["inspect"], {"inspect": True}, 7, None])
+def test_a_check_with_a_malformed_mode_is_a_write_and_does_not_raise(mode: object) -> None:
+    streaks = StatusReadStreaks()
+    streaks.note_call("status", _status_args())
+    assert streaks.note_call("check", {"session_id": _SESSION, "mode": mode}) == 0
+    assert streaks.note_call("status", _status_args()) == 1
+
+
+@pytest.mark.anyio
+async def test_a_status_and_inspection_loop_still_gets_the_nudge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patched_status(monkeypatch, _obligations_wire())
+
+    async def fake_check(
+        arguments: Mapping[str, object], runtime: bridge.BridgeRuntime = bridge.BRIDGE_RUNTIME
+    ) -> types.CallToolResult:
+        del arguments, runtime
+        return types.CallToolResult(
+            content=[types.TextContent(type="text", text="Check inspection (read only);")],
+            structuredContent={"ok": True, "state": "inspected"},
+            isError=False,
+        )
+
+    monkeypatch.setattr(bridge, "dispatch_check", fake_check)
+    runtime = bridge.build_bridge_runtime("policy", host_profile="generic")
+    inspect = {"session_id": _SESSION, "actor": _status_args()["actor"], "mode": "inspect"}
+    try:
+        results: list[types.CallToolResult] = []
+        for _ in range(3):
+            await bridge.call_tool("check", inspect, runtime)
+            results.append(await bridge.call_tool("status", _status_args(), runtime))
+    finally:
+        await bridge.close_bridge_runtime(runtime)
+    assert _texts(results[0]) == [_SUMMARY] and _texts(results[1]) == [_SUMMARY]
+    (text,) = _texts(results[2])
+    assert text.startswith("Status read 3 times in a row with no write."), text

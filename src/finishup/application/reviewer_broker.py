@@ -671,6 +671,16 @@ class ReviewerBroker:
         }
         refs = tuple(r for r in (item.source_ref, *item.linked_subject_refs) if r in self._allowed)
         start, stop = _clear(content, offset, "tail"), len(content)
+        # ``offset`` names the redacted text, which can be longer or shorter than the record.
+        # Redaction keeps every line break, so admission scans the record from the start of the
+        # raw line the served text starts on: never a later, narrower raw suffix.
+        raw_start = 0
+        for _ in range(content[:start].count(b"\n")):
+            following = item.content.find(b"\n", raw_start)
+            if following < 0:  # not expected; scanning the whole record is never narrower
+                raw_start = 0
+                break
+            raw_start = following + 1
         root = dict(self._case.input_roots).get(item.item_id)
         return _Piece(
             content,
@@ -682,16 +692,14 @@ class ReviewerBroker:
             None,
             root,
             item.category,
-            admission_source=item.content[_clear(item.content, offset, "tail") :],
+            admission_source=item.content[raw_start:],
         )
 
     def _packet(self, args: ReadPacketSectionArgsModel) -> _Selected:
         item = next((i for i in self._case.items if i.item_id == args.item_ref), None)
-        if (
-            item
-            and item.section in _PACKET_SECTIONS[args.section]
-            and args.offset < len(item.content)
-        ):
+        # The offset names the redacted text the spans describe, so only ``_item`` can tell
+        # whether anything is left at it: the raw record's length is not that text's length.
+        if item and item.section in _PACKET_SECTIONS[args.section]:
             piece = self._item(item, args.offset)
             if piece is None:
                 return ("denied", "privacy_withheld")
@@ -871,7 +879,9 @@ class ReviewerBroker:
         starts = [0, *(m.end() for m in re.finditer(b"\n", data))]
         first, last = args.start_line - 1, args.start_line - 1 + args.line_count
         if first >= len(starts) or starts[first] >= len(data):
-            return ("unavailable", "byte_budget" if size > len(data) else "not_recorded")
+            # An over-size file was withheld above, before redaction; a shorter redacted file
+            # still names a missing line, not a spent result budget.
+            return ("unavailable", "not_recorded")
         stop = starts[last] if last < len(starts) else len(data)
         try:
             data[starts[first] : stop].decode()

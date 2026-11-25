@@ -549,6 +549,7 @@ def everyday_network_state() -> NetworkState:
     the everyday installation's ``selection_override(None)`` again inside it.
     """
 
+    import contextlib
     import contextvars
 
     import anyio
@@ -560,17 +561,22 @@ def everyday_network_state() -> NetworkState:
     from finishup.service.client import connect_service
 
     async def read(request: JsonObject) -> bool | None:
+        # One bound covers the whole exchange: a service that accepts the connection but never
+        # answers is a policy that cannot be read, like one that cannot be reached.
         try:
             with anyio.fail_after(_POLICY_READ_SECONDS):
                 client = await connect_service(ControlClientKind.CLI, workspace_locator=None)
+                try:
+                    response = await client.privacy_get_effective(request)
+                finally:
+                    # Closed even when the bound cancelled the call, and bounded itself.
+                    with (
+                        anyio.move_on_after(_POLICY_READ_SECONDS, shield=True),
+                        contextlib.suppress(Exception),
+                    ):
+                        await client.close()
         except (ControlError, TimeoutError):
             return None
-        try:
-            response = await client.privacy_get_effective(request)
-        except ControlError:
-            return None
-        finally:
-            await client.close()
         # The reply is a frozen ``JsonObject`` (a ``Mapping``, not a ``dict``) on the wire.
         policy = response.get("policy")
         if not isinstance(policy, Mapping):

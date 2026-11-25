@@ -887,8 +887,13 @@ async def resolve_captured_semantic_content(
         )
     )[:_MAX_CAPTURED_SEMANTIC_PARTS]
     metadata_selection_truncated = len(candidates) > len(selected_objects)
+    # Coverage losses (metadata truncation, a selected capture no bounded read reached) are kept
+    # apart from the profile-intersection gap, so activating the Codex arm below cancels only
+    # the latter and never hides a dropped capture.
+    coverage_gaps: set[str] = set()
     if metadata_selection_truncated:
-        gaps.add(ObservationGapCode.CONTENT_UNSELECTED.value)
+        coverage_gaps.add(ObservationGapCode.CONTENT_UNSELECTED.value)
+    gaps.update(coverage_gaps)
     if not selected_objects:
         return CapturedContentResolution(
             scope,
@@ -904,9 +909,10 @@ async def resolve_captured_semantic_content(
         workspace=workspace_commitment,
         session_id=runtime.session_id,
         task_id=runtime.task_id,
-        gaps=gaps,
+        gaps=coverage_gaps,
         content_refs=frozenset(selected_objects),
     )
+    gaps.update(coverage_gaps)
     if codex_historical_candidate:
         # Only this exact source/session route can activate the profileless
         # historical arm. Structural Codex envelopes without linked content do
@@ -932,6 +938,7 @@ async def resolve_captured_semantic_content(
                 ),
             )
             gaps.discard(ObservationGapCode.CONTENT_UNSELECTED.value)
+            gaps.update(coverage_gaps)
         elif scope is None:
             return CapturedContentResolution(
                 None,

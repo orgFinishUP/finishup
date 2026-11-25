@@ -77,7 +77,7 @@ _MAX_COUNT: Final = 1_000_000_000
 EVIDENCE_COUNT_MAX: Final = _MAX_COUNT
 _HEX40: Final = re.compile(r"^[0-9a-f]{40}$")
 # RFC 3339 UTC with milliseconds, as the service stamps every time it records.
-_TIME: Final = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$")
+_TIME: Final = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z$")
 
 
 # A claim-bound task's account could not be given (every receipt format carries this as its
@@ -162,7 +162,7 @@ def _count(value: object) -> int:
 
 
 def _time(value: object) -> str:
-    if type(value) is not str or _TIME.match(value) is None:
+    if type(value) is not str or _TIME.fullmatch(value) is None:
         raise _invalid()
     return value
 
@@ -176,7 +176,7 @@ class CopySnapshotRef:
 
     def __post_init__(self) -> None:
         _time(self.synced_at)
-        if type(self.tree) is not str or _HEX40.match(self.tree) is None:
+        if type(self.tree) is not str or _HEX40.fullmatch(self.tree) is None:
             raise _invalid()
 
 
@@ -209,11 +209,12 @@ class EvidenceProvenance:
         reads = cast(Mapping[object, object], given)
         if any(token not in EVIDENCE_PROVENANCE_TOKENS for token in reads):
             raise _invalid()
-        frozen = {
-            token: _count(reads[token])
-            for token in EVIDENCE_PROVENANCE_TOKENS
-            if token in reads and reads[token] != 0
+        # Every present count is checked before zeros are dropped, so a zero that is not an
+        # integer (false, 0.0) is refused like any other non-integer count.
+        counted = {
+            token: _count(reads[token]) for token in EVIDENCE_PROVENANCE_TOKENS if token in reads
         }
+        frozen = {token: count for token, count in counted.items() if count != 0}
         object.__setattr__(self, "reads", MappingProxyType(frozen))
         _count(self.fenced_reads)
         if self.snapshot is not None and type(self.snapshot) is not CopySnapshotRef:

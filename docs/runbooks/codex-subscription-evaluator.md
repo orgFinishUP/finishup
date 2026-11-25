@@ -848,7 +848,7 @@ the same token as an owner-only diagnostic line (`semantic_composition` /
 | `rate_limits_invalid` | Unrecognized bounded rate-limit bookkeeping. | Before disclosure: terminal unsupported profile. After acknowledgement: nonterminal diagnostic, including on an otherwise successful result; a later terminal stage replaces it. No account fields are retained. |
 | `token_usage_invalid` | A matching active-turn usage snapshot was malformed or regressed. | Nonterminal telemetry gap; preserve any earlier valid cumulative snapshot and never invalidate the AI-powered judgment solely for usage bookkeeping. |
 | `turn_failed`, `model_rerouted` | Codex reported an authoritative native error or a different bound model. | Usage exhaustion maps to `provider_quota_exhausted`; HTTP 429 maps to `provider_rate_limited`. Only an independently authorized fallback may handle those reasons. Model rerouting remains terminal authorization refusal. |
-| `agent_message_count`, `output_empty`, `output_oversize`, `completion_mismatch` | The completion did not yield exactly one bounded, correlated final answer. `output_oversize` also covers a usage snapshot whose visible output tokens exceeded the check's output limit; the turn is interrupted when that happens. | Terminal answer/completion validation (`response_schema_invalid`). Never retried and never a fallback trigger. Raise the profile's `*_output_limit` if valid judgments hit it. |
+| `agent_message_count`, `output_empty`, `output_oversize`, `completion_mismatch` | The completion did not yield exactly one bounded, correlated final answer. `output_oversize` also covers a usage snapshot whose visible output tokens exceeded the turn's output limit; the turn is interrupted when that happens. | Terminal answer/completion validation (`response_schema_invalid`). Never retried and never a fallback trigger. Raise the profile's `*_output_limit` if valid judgments hit it. |
 | `output_not_json` | The final answer was not strict JSON (prose, fenced code, trailing text). | Terminal; not retried. |
 | `judgment_envelope_invalid`, `judgment_enum_invalid`, `judgment_refs_duplicate`, `judgment_refs_invalid`, `judgment_conclusion_mismatch`, `judgment_text_bounds`, `judgment_shape_invalid`, `judgment_invariant_invalid` | Strict JSON that failed the frozen judgment contract at the named stage. | Terminal (`response_schema_invalid`); asking again is not a fix. `judgment_refs_invalid` is the model citing an item id instead of a `citable_refs` entry. |
 | `request_failed`, `transport_failed`, `deadline_expired`, `cleanup_unconfirmed`, `event_limit`, `runtime_warning`, `unclassified` | Runtime transport, deadline, event-budget, warning, or cleanup ambiguity. | Per ADR-006: pre-acknowledgement transients may retry; post-acknowledgement ambiguity is `outcome_unknown` and is not retried. No invalid-answer classification. |
@@ -1016,7 +1016,8 @@ same effort and output limit.
   Re-running setup carries them over. The app-server protocol has no per-turn output ceiling,
   so FinishUP compares each `thread/tokenUsage/updated` snapshot's visible output
   (`output_tokens − reasoning_output_tokens`) with the selected limit and interrupts the turn as
-  `output_oversize` when it is exceeded. When Codex reports no usage, the limit is recorded but
+  `output_oversize` when it is exceeded. Each turn of a multi-turn review is held to the limit on
+  its own visible output, not the thread's running total. When Codex reports no usage, the limit is recorded but
   not measured.
 - **Provenance.** `runtime_evidence.reasoning_effort`, `sampling_params.max_output_tokens`, and
   `semantic_provenance.model` name the exact selection per check, and `selection_sha256`

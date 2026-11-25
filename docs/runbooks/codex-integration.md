@@ -14,10 +14,14 @@ native acceptance on each host/OS remains a separate claim. See
 [the reviewer contract](../INTERFACES.md#reviewer-loop-issue-1118-unit-2).
 
 Per-exchange prompt-cache telemetry (#1172) is shared service behavior too: each reviewer
-exchange that reports usage writes one content-free `exchange_cache` owner diagnostic (input,
-cached, cache-write where reported and output tokens, and a closed miss label), read with
+exchange the provider answers writes one content-free `exchange_cache` owner diagnostic (input,
+cached, cache-write where reported and output tokens, and a closed miss label, or without counts
+whether its usage was unreported or refused), read with
 `finishup service diagnostics --request-id`. It does not depend on the agent host, adds no
 request or egress, and never changes a review outcome. See [the exchange contract](../INTERFACES.md#reviewer-completion-exchanges-issue-1118-unit-3-adr-006).
+`finishup service diagnostics --reviewer-cache` sums those records per review and in total; it is an
+owner-only CLI report, not offered over MCP tools, hook events or the terminal interface on any
+host (ADR-006, 2026-11-21 amendment).
 The reviewer also keeps its reply schema through a review's normal final turn and announces that
 turn with a short appended notice, so the provider can reuse the conversation from its cache. Only
 the final-phase repair turn, or a final turn after the review's one repair is spent, changes the
@@ -736,6 +740,41 @@ skill at `.agents/skills/finishup`, installs managed structural plugin/hook sour
 entry. The plugin source directory, marketplace entry, or enabled config table alone is not
 evidence that Codex activated a plugin.
 
+Installing the plugin source replaces `.agents/plugins/finishup` as a whole directory, so it
+proceeds only when every file there is FinishUP's: this release's managed files and marker, or a
+prior render that byte-matches its own valid marker (ADR-023 §6, §9). A directory holding any
+other file, whether an owner note added to an installed tree or a hand-made directory with no
+marker, is refused as `destination_conflict` (`unmanaged_files: true`) and left untouched;
+`replace_modified` covers edited managed files only and never authorizes removing unmanaged
+files. Plugin inspection reports such a tree as not exact (`installed_untrusted_unknown`), its
+digest binds the unmanaged files, and activation preview refuses it with the same
+`destination_conflict` (`unmanaged_files: true`) before any Codex command.
+
+Every setup route gives one continuation for it, naming the directory: move those files, or the
+whole directory, outside `.agents/plugins`, then rerun setup. Which reason carries it depends on
+where the route stops:
+
+- `setup run --host codex` (preview and `--accept`) and `setup status --host codex` stop at the
+  activation preview: outcome `incomplete`, reason `destination_conflict`, the continuation as
+  `next_step`. This is not the Codex-home conflict text the same reason has otherwise: nothing in
+  the Codex home is the cause, and a separate home meets the same directory.
+- The terminal interface shows the continuation under the refused plan. If the files appear
+  after the plan was shown, the approved apply previews again and reports
+  `activation_preview_failed` with the same continuation.
+- The historical wizard (`setup run` with Codex as the only host found, or `--codex-path`)
+  installs sources even when activation cannot be previewed, so an accepted run reports
+  `plugin_install_failed` with the continuation.
+- A setup run or status for several agents at once reports `destination_conflict` with its
+  general next step (inspect setup status for the selected agents), and `setup status --next`
+  reports `connection_unavailable` with the `setup status --host codex` command; that status
+  then names the directory.
+
+`integrate codex plugin status` is an inspection, not a setup: it reports such a tree as
+`installed_not_activated`, like any other byte-present tree that is not an exact render (issue
+#347), also when Codex still lists the plugin as installed and enabled. `integrate codex plugin
+preview|remove` and `setup disconnect --host codex` still work for it and leave the plugin source
+directory, with the owner's files, in place.
+
 Activation is a standing-trust mutation for future sessions in one owner-selected Codex home. The
 owner must explicitly supply an existing absolute, non-symlink home; setup never derives it from a
 wrapper basename, ambient environment, or a pre-consent Codex diagnostic. Setup binds the exact
@@ -792,9 +831,10 @@ version stays constant while plugin content drifts, a previously activated home'
 legitimately differ from the fresh render: a cache tree that carries a valid
 `.yoetz-plugin-install.json` marker and byte-matches that marker's own inventory is a prior
 finishup-managed render, previewed as a same-version refresh and replaced atomically on apply.
-`destination_conflict` is reserved for foreign, marker-inconsistent, or modified cache trees and
-for FinishUP-named configuration FinishUP did not write — those still require the owner to resolve the
-conflict by hand. A binding to another connected project is the shared marketplace, not a conflict
+`destination_conflict` is reserved for foreign, marker-inconsistent, or modified cache trees, for
+FinishUP-named configuration FinishUP did not write, and for a project plugin directory holding
+files FinishUP did not write (above) — those still require the owner to resolve the conflict by
+hand. A binding to another connected project is the shared marketplace, not a conflict
 (see [Several projects in one Codex home](#several-projects-in-one-codex-home-issue-1058)). An exact
 Yoetz-era activation of the same project is migrated, not a conflict (see
 [Legacy Yoetz registrations](#legacy-yoetz-registrations)).
@@ -2443,7 +2483,7 @@ egress.
 | Write/swap interrupted | Run `status`; preserve any staged content; do not delete it yourself. |
 | Skill not discovered, or duplicate `$finishup` names loaded | Check the exact scope, loaded skill roots, managed path, trust, version, and capability matrix; reload Codex. |
 | Setup reports `installed_not_activated` | Run `finishup recommend list --codex-path <exact-executable> --codex-home <exact-home>`, then accept only the freshly shown target/preview digest. Historical acceptance cannot suppress an observed inactive target; a decline suppresses only its unchanged exact target. Review canonical inventory and the versioned cache; marketplace/config presence alone is insufficient. A marker-consistent stale cache is refreshed by an ordinary approved re-run. |
-| Activation reports `destination_conflict` | The versioned cache (or a config/marketplace surface) holds foreign, marker-inconsistent, or modified content. Review it by hand; setup only replaces trees that match their own FinishUP install marker. Another FinishUP-connected project in the same home is not a conflict. |
+| Activation reports `destination_conflict` | The versioned cache (or a config/marketplace surface) holds foreign, marker-inconsistent, or modified content. Review it by hand; setup only replaces trees that match their own FinishUP install marker. Another FinishUP-connected project in the same home is not a conflict. When the next step names `.agents/plugins/finishup` instead, that directory holds files FinishUP did not write: move them, or the whole directory, outside `.agents/plugins` and rerun setup. A different Codex home does not help. |
 | Setup reports `project_connected_via_other_path` | This directory is already connected under another path (symlink, letter case, or a move). Run the `setup disconnect` the message names for this project (it clears the other entry), then connect again. |
 | Disconnect reports `membership_unverified` | No verified project is left to carry the shared pieces, but projects FinishUP connected earlier or trusted checkouts with FinishUP's plugin files (`possible_users`) might still use them. Reconnect the project that uses FinishUP (that records it) and rerun the disconnect, or preview `setup disconnect --remove-shared` if none does. |
 | Setup reports `connection_lock_unavailable` | Nothing changed. FinishUP could not take its setup lock under its own state directory (the folder is named in the message). It must be a local, owner-only (0700) folder without symlinked parts on a filesystem that supports `flock`. |
@@ -2464,10 +2504,11 @@ egress.
 | `observe reconcile` of a child rollout reports `child_parent_unmapped` | The v2 child header names a spawning session that is not bound to the selected workspace alone with a lifecycle mapping. Reconcile or attach the parent session in its own workspace first, or select the workspace that owns it. Nothing was ingested (#841). |
 | `observe reconcile` of a child rollout reports `child_route_missing` | The spawning session is mapped, but no validated attach published a child lane for this child thread: the child's attach callback carried neither a host child alias nor its own transcript, or no hook reached the child thread. Read `hook_diagnostics.reasons` for `start_bind_child_lane_unbound`. The provisional annotation stays unbound; nothing is inferred from stream status or annotation counts (#841). |
 | `observe reconcile` of a child rollout reports `child_route_ambiguous` or `child_identity_invalid` | More than one route or workspace claims the child thread, or the header declares a delegated child without a usable distinct child and spawning thread. Nothing was ingested; the observation keeps its bounded gap (#841). |
+| `observe reconcile` exits 20 with `observation_reconcile_failed:storage_unsafe` (`retryable: true` in JSON) | A workspace state document could not be read while the pass looked up which workspace owns the session. The lookup reads every workspace's state document, so the failing one may belong to another workspace. Nothing from the pass was kept: the stream cursor and the outbox are unchanged, so running the command again reads the same rows. In a hook pass the same failure discards that pass's stream reconcile and the next reconciling hook repeats it; a failure that lasts makes the hook pass itself record `observe_exception_public_operation_error`. |
 | `hook_diagnostics.reasons` shows `child_transcript_identity_conflict` | A Codex callback's own transcript proved it came from a delegated child that it cannot name for the callback's session, or that contradicts the host child alias. The callback is an explicit attribution gap and is never delivered as parent work (#841). |
 | `observe status` shows pending `mapping_missing` after a runtime route conflict | A non-retryable `SESSION_CONFLICT` while acquiring the task runtime keeps the envelope pending for a later drain after its lifecycle mapping is repaired. The route must still pass its ownership checks. Non-retryable conflicts after runtime acquisition remain `ledger_rejected` and enter quarantine. Retryable route conflicts report `service_unavailable` and stay pending. |
 | `observe status` shows `ledger_rejected` and `outbox_quarantined` | The service was reachable but rejected one envelope non-retryably. A repeated envelope after a lost acknowledgement, a service restart, or a workflow reattach (a second `start` in the same Codex session) is not such a rejection: its committed operation is resolved task-wide and the row is acknowledged idempotently with no quarantine row. A pending row from an ended host session whose task a successor recovered is delivered on the successor route (`session_superseded` is followed) and is also not `ledger_rejected`. A successor binding that cannot be followed quarantines that row as `session_superseded`, not `mapping_missing`. A `ledger_rejected` row is a genuine conflicting reuse of an event or operation identity. The row is retained under `quarantine_causes`, aggregate `delivery_causes`, and gaps; `pending_delivery_causes` names only rows still in the outbox. Later rows can drain; reclaim only after the underlying defect is understood. A hook-driven attempt also appears in the bounded `hook_diagnostics`, while manual and supervisor drains are represented by status rather than hook activity. Do not restart a ready service. A row is also quarantined after 128 consecutive rejections with the same retryable reason so a catch-all failure cannot block the lane forever; pause, vault, disabled, and designed back-pressure reasons keep their existing recovery behavior. |
-| `observe status` exits with `observation_status_failed:<reason>` | The reason names the layer: `workspace_unresolvable` (exit 2) is the locator; `storage_unsafe` (exit 20) is an unsafe state/lock path; `storage_unavailable` (exit 20) is a bounded open, permission, read-only, missing-parent, or lock-acquisition failure; `storage_corrupt` (exit 40) is invalid stored data. The fixed remediation never prints the absolute state path. A sandboxed Codex result proves only that sandbox cell; run and record an unrestricted-terminal comparison separately before making that claim. |
+| `observe status` exits with `observation_status_failed:<reason>` | The reason names the layer: `workspace_unresolvable` (exit 2) is the locator; `storage_unsafe` (exit 20) is an unsafe state/lock path; `storage_unavailable` (exit 20) is a bounded open, permission, read-only, missing-parent, or lock-acquisition failure; `storage_corrupt` (exit 40) is invalid stored data. The fixed remediation never prints the absolute state path. The `observe checks` verbs report the store's `storage_corrupt` or `storage_unsafe` refusal of a workspace state file or key the same way, as `observation_checks_<op>_failed:<reason>` with the same exit; their other workspace and store faults stay `observation_checks_<op>_failed:unavailable` (exit 20). A sandboxed Codex result proves only that sandbox cell; run and record an unrestricted-terminal comparison separately before making that claim. |
 
 When more than one eligible ended same-host mapping names a different task, automatic admission
 records the closed `auto_attach_binding_ambiguous` cause and does not guess or create around the
@@ -3339,7 +3380,8 @@ home-relative or drive-relative locator, or any `..` path is replaced by `<outsi
 dropped. The rule is lexical and identical on macOS, Linux and Windows through WSL 2: POSIX
 (`/home/<user>/...`, `/Users/<user>/...`), Windows drive (`C:\...`), UNC (`\\server\share\...`) and WSL
 mount (`/mnt/c/...`) spellings are compared, with drive, mount and UNC forms matched
-case-insensitively, and no filesystem lookup is made. Edits use the ordinary capture caps (at most
+case-insensitively one character at a time, as NTFS does (`ß` never matches `SS`), and no
+filesystem lookup is made. Edits use the ordinary capture caps (at most
 16 chunks and about 680 KB per event), not the routine-output budgets, and remain subject to the
 existing capture consent, secret scanning and outbox admission.
 
@@ -4167,8 +4209,12 @@ Host decisions for Codex; the shared classifier parts apply to Claude Code and C
   missing user fact never stands for its opposite: `verification_only_as_root` is decided over the
   verification runs that state a user and, when none does, over the commands that do. A completed
   `CommandExecution` item records an argv (`["/bin/bash", "-lc", CMD]`); its writes and heredoc
-  patch paths are read from that script, however long. A call whose row was written but which
-  Codex never ran (an interrupted turn, a declined approval) still counts as a verification run
+  patch paths are read from that script, however long. A legacy `shell` hook states the same argv
+  shape, and its install target is read from that script too, as its stream copy's is (#1435). A
+  noexec argv (`["bash", "-nc", CMD]`, a syntax check) runs none of `CMD`: neither copy reports an
+  install target for it, and both still read `CMD` for the writes it could make. A
+  call whose row was written but which Codex never ran (an interrupted turn, a declined approval)
+  still counts as a verification run
   with an unknown outcome, as a declined `PreToolUse` already did (gap kept; follow-up is the
   #1106 owner's). Supported.
 - **Exit codes of direct calls.** A Codex 0.159 `Bash` PostToolUse states no exit code. The

@@ -1395,9 +1395,93 @@ def test_supervisor_revisit_timer_rebuilds_once_per_session_and_stops_cleanly() 
         supervisor.schedule_revisit(_COMMITMENT, _SESSION, 30.0)
         await supervisor.stop()
         assert supervisor.pending_revisits() == ()
+        assert supervisor.revisit_deadline(_COMMITMENT, _SESSION) is None
         return calls
 
     assert asyncio.run(scenario()) == [(_COMMITMENT, _SESSION)]
+
+
+def _revisit_fires_in(supervisor: ObservationAdviceSemanticSupervisor) -> float:
+    deadline = supervisor.revisit_deadline(_COMMITMENT, _SESSION)
+    assert deadline is not None
+    return deadline - asyncio.get_running_loop().time()
+
+
+def test_supervisor_revisit_keeps_the_earliest_requested_deadline() -> None:
+    async def scenario() -> tuple[float, float]:
+        supervisor = ObservationAdviceSemanticSupervisor(service_generation=1)
+
+        async def handler(_workspace: str, _session: str) -> None:
+            return None
+
+        supervisor.set_revisit_handler(handler)
+        # A later request is armed first, then a sooner one replaces it.
+        supervisor.schedule_revisit(_COMMITMENT, _SESSION, 300.0)
+        supervisor.schedule_revisit(_COMMITMENT, _SESSION, 120.0)
+        sooner = _revisit_fires_in(supervisor)
+        # A later request never pushes back an already-armed sooner timer.
+        supervisor.schedule_revisit(_COMMITMENT, _SESSION, 600.0)
+        kept = _revisit_fires_in(supervisor)
+        assert supervisor.pending_revisits() == ((_COMMITMENT, _SESSION),)
+        await supervisor.stop()
+        assert supervisor.pending_revisits() == ()
+        return sooner, kept
+
+    sooner, kept = asyncio.run(scenario())
+    assert 119.0 <= sooner <= 120.0
+    assert 119.0 <= kept <= 120.0
+
+
+def test_sooner_eligible_identity_revisits_before_another_identitys_backoff() -> None:
+    _db, repository = _repository()
+    store = _Store(repository)
+    failed = ObservationAdviceSemanticOutcome(status="failed", failure_reason="provider_failed")
+    # Identity X is admitted and fails at the provider, then fails again after its backoff.
+    asyncio.run(
+        _scheduler_builder("2026-09-08T21:00:00.000Z").build(
+            _COMMITMENT, store, finishup_session_id=_SESSION
+        )
+    )  # type: ignore[arg-type]
+    _complete_next(repository, failed, at="2026-09-08T21:00:00.000Z")
+    asyncio.run(
+        _scheduler_builder("2026-09-08T21:03:00.000Z").build(
+            _COMMITMENT, store, finishup_session_id=_SESSION
+        )
+    )  # type: ignore[arg-type]
+    _complete_next(repository, failed, at="2026-09-08T21:03:00.000Z")
+
+    async def scenario() -> tuple[list[float], float]:
+        supervisor = ObservationAdviceSemanticSupervisor(service_generation=1)
+
+        async def handler(_workspace: str, _session: str) -> None:
+            return None
+
+        supervisor.set_revisit_handler(handler)
+        requested: list[float] = []
+
+        def revisit(workspace: str, session: str, delay: float) -> None:
+            requested.append(delay)
+            supervisor.schedule_revisit(workspace, session, delay)
+
+        def builder() -> ObservationAdviceContextBuilder:
+            return ObservationAdviceContextBuilder(
+                semantic_scheduler=ObservationAdviceSemanticScheduler(
+                    now=_at("2026-09-08T21:04:00.000Z"), revisit=revisit
+                )
+            )
+
+        # X is in its second, longer backoff: the revisit is due in 300 s.
+        await builder().build(_COMMITMENT, store, finishup_session_id=_SESSION)  # type: ignore[arg-type]
+        # The candidates change to Y, held only by the session interval: due in 120 s.
+        store.gaps = (ObservationGapCode.SOURCE_LAG.value,)
+        await builder().build(_COMMITMENT, store, finishup_session_id=_SESSION)  # type: ignore[arg-type]
+        fires_in = _revisit_fires_in(supervisor)
+        await supervisor.stop()
+        return requested, fires_in
+
+    requested, fires_in = asyncio.run(scenario())
+    assert [round(delay) for delay in requested] == [300, 120]
+    assert fires_in <= 120.0
 
 
 def test_explicit_dispatch_outside_the_worker_is_not_background() -> None:

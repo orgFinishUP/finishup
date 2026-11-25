@@ -360,6 +360,31 @@ def test_container_or_inconsistent_fields_fail_closed_without_raising(
     assert [entry["count"] for entry in _entries(tmp_path, now=datetime.now(UTC))] == [1]
 
 
+def test_an_aggregate_nested_past_the_decoder_limit_reads_unreadable_and_restarts(
+    tmp_path: Path,
+) -> None:
+    directory = tmp_path / "observation"
+    directory.mkdir(mode=0o700)
+    target = directory / "hook-pass-timing.json"
+    deep = b"[" * 60_000  # under the 64 KiB read cap, deeper than the JSON decoder recurses
+    target.write_bytes(deep)
+    os.chmod(target, 0o600)
+
+    summary = hook_pass_timing_summary(_state=tmp_path, _now=_NOW)
+    assert summary["status"] == "unreadable"
+    assert hook_pass_timing_text(summary) == "unreadable; restarts on next hook"
+    diagnostics = hook_diagnostic_summary(_state=tmp_path)
+    assert cast(Mapping[str, object], diagnostics["pass_timings"])["status"] == "unreadable"
+
+    assert record_hook_pass_timing(
+        "codex", "Stop", "observe", "ingested", ms=5, _state=tmp_path, _now=_NOW
+    )
+    assert target.read_bytes() != deep
+    restarted = hook_pass_timing_summary(_state=tmp_path, _now=_NOW)
+    assert restarted["status"] == "retained"
+    assert [entry["count"] for entry in _entries(tmp_path)] == [1]
+
+
 def test_a_symlinked_aggregate_is_neither_read_nor_replaced(tmp_path: Path) -> None:
     directory = tmp_path / "observation"
     directory.mkdir(mode=0o700)

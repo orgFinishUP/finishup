@@ -19,6 +19,7 @@ from finishup.protocol.server_profile import (
     PROFILE_DIGEST_DOMAIN,
     ProfileError,
     ServerProfile,
+    ServerProfileRevision,
     envelope_for,
     profile_from_json,
     profile_to_json,
@@ -109,6 +110,15 @@ def test_bytes_are_bounded_and_must_be_strict_json() -> None:
         (("release",), "latest"),
         (("profile_revision", "revision"), 0),
         (("profile_revision", "issuer"), "ABC"),
+        # The contract bounds a release to 128 characters.
+        (("release",), "0.3.0-" + "a" * 123),
+        # Every pattern matches the whole value: a trailing line feed is not part of any member.
+        (("release",), "0.3.0\n"),
+        (("service_instance_id",), "svc_01234567-89ab-4def-8123-456789abcdef\n"),
+        (("schema_manifest_digest",), "sha256:" + "ab" * 32 + "\n"),
+        (("profile_revision", "issuer"), "0123456789abcdef0123456789abcdef\n"),
+        (("key", "principal"), "owner\n"),
+        (("key", "id"), "key-1\n"),
     ],
 )
 def test_a_malformed_member_refuses_the_profile(path: tuple[str, ...], value: object) -> None:
@@ -120,6 +130,24 @@ def test_a_malformed_member_refuses_the_profile(path: tuple[str, ...], value: ob
 
     with pytest.raises(ProfileError):
         profile_from_json(cast(JsonValue, _resealed(document)))
+
+
+def test_a_trailing_line_feed_refuses_a_disclosure_and_a_revision() -> None:
+    document = _document("l1_server_policy_review")
+    document["review"]["provider_disclosure"] = "openai\n"
+    with pytest.raises(ProfileError) as disclosure:
+        profile_from_json(cast(JsonValue, _resealed(document)))
+    assert disclosure.value.reason == "profile_member_invalid"
+
+    digest = "sha256:" + "ab" * 32
+    with pytest.raises(ProfileError):
+        ServerProfileRevision("0123456789abcdef0123456789abcdef\n", 1, digest)
+    with pytest.raises(ProfileError):
+        ServerProfileRevision("0123456789abcdef0123456789abcdef", 1, digest + "\n")
+    # The longest release the contract admits still parses.
+    longest = _document("l1_no_ai_review")
+    longest["release"] = "0.3.0-" + "a" * 122
+    assert profile_from_json(cast(JsonValue, longest)).release == longest["release"]
 
 
 def test_copy_members_are_present_exactly_when_level_two_is_offered() -> None:

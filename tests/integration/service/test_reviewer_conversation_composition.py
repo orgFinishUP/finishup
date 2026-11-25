@@ -33,11 +33,13 @@ from finishup.domain.privacy import (
     ConsentSource,
     EgressAuthorization,
     EgressChannel,
+    EgressReceipt,
     PrivacyPolicy,
     ProviderBinding,
 )
 from finishup.domain.reviewer_reads import render_reviewer_lines
 from finishup.ports.privacy import (
+    ConsumedAuthorization,
     DisclosureProposalRequest,
     EffectivePrivacyPolicy,
     HumanAuthorityCapability,
@@ -97,13 +99,16 @@ class _Key:
 
 
 class _Audit(MemoryPrivacyAudit):
-    """The memory disclosure audit, plus the network authority the catalog audit mints."""
+    """The memory disclosure audit, plus the network authority the catalog audit mints and the
+    one-use consume the real gateway asks of it."""
 
-    __slots__ = ("requests",)
+    __slots__ = ("authorizations", "consumed", "requests")
 
     def __init__(self, *args: object) -> None:
         super().__init__(*args)  # pyright: ignore[reportArgumentType]
         self.requests: dict[str, DisclosureProposalRequest] = {}
+        self.authorizations: dict[str, EgressAuthorization] = {}
+        self.consumed: set[str] = set()
 
     async def prepare_disclosure_proposal(
         self, request: DisclosureProposalRequest
@@ -123,7 +128,7 @@ class _Audit(MemoryPrivacyAudit):
     ) -> EgressAuthorization:
         request = self.requests[reservation_id]
         assert request.provider_binding is not None
-        return EgressAuthorization(
+        authorization = EgressAuthorization(
             new_id(IdKind.EGRESS_AUTHORIZATION),
             reservation_id,
             approved_case_digest,
@@ -140,6 +145,26 @@ class _Audit(MemoryPrivacyAudit):
             now + timedelta(seconds=60),
             1,
         )
+        self.authorizations[authorization.authorization_id] = authorization
+        return authorization
+
+    async def consume(
+        self,
+        authorization_id: str,
+        dispatch_id: str,
+        now: datetime,
+        *,
+        owed_receipt: EgressReceipt | None = None,
+    ) -> ConsumedAuthorization:
+        # Each authorization admits exactly one attempt.
+        del owed_receipt
+        if authorization_id in self.consumed or authorization_id not in self.authorizations:
+            raise ValueError("privacy_audit_authorization_unavailable")
+        self.consumed.add(authorization_id)
+        return ConsumedAuthorization(self.authorizations[authorization_id], dispatch_id, now)
+
+    async def complete_egress(self, dispatch_id: str, receipt: EgressReceipt) -> None:
+        del dispatch_id, receipt
 
 
 class _ScriptedGateway:
@@ -201,8 +226,11 @@ async def _run(
     *replies: dict[str, JsonValue] | Callable[..., object],
     policy: PrivacyPolicy | None = None,
     primary: ProviderBinding | None = _BINDING,
+    gateway_for: Callable[[_Audit, FixedClock], Any] | None = None,
     **evaluator_options: object,
-) -> tuple[FinalSemanticEvaluation, _ScriptedGateway, TaskRuntime]:
+) -> tuple[FinalSemanticEvaluation, Any, TaskRuntime]:
+    """``gateway_for`` puts another gateway (the real one) behind the coordinator's audit."""
+
     work = tmp_path / "work"
     work.mkdir(mode=0o700)
     (work / "calc.py").write_text("def add(a, b):\n    return a + b\n")
@@ -218,12 +246,12 @@ async def _run(
     policy = policy or minimal_external_policy()
     effective = EffectivePrivacyPolicy(policy, 1, policy.policy_digest)
     store = non_dispatch._PolicyStore(effective, repository_granted=True)  # pyright: ignore[reportPrivateUsage]
-    gateway = _ScriptedGateway(*replies)
     clock = FixedClock()
     route = non_dispatch._route_for(runtime.task_id, runtime.session_id)  # pyright: ignore[reportPrivateUsage]
     state = MemoryPrivacyCatalogState()
     state.routes[runtime.task_id] = route.route_identity_digest
     audit = _Audit(state, runtime.objects, _Key(), clock)
+    gateway = _ScriptedGateway(*replies) if gateway_for is None else gateway_for(audit, clock)
     human = HumanAuthorityCapability(
         "established_passphrase", "sha256:" + "9" * 64, 1, "unlocked", 1, True
     )

@@ -2623,7 +2623,7 @@ def test_result_field_classification_is_closed() -> None:
 def test_result_leaf_registry_has_exhaustive_schema_parity() -> None:
     models = _models_module()
     catalog = load_schema_catalog()
-    rules = cast(tuple[Any, ...], getattr(models, "_RESULT_LEAF_RULES"))
+    rules = cast(tuple[Any, ...], getattr(models, "_result_leaf_rules")())
 
     derived_patterns = _derived_result_success_patterns(catalog)
     assert (
@@ -3428,8 +3428,9 @@ def test_schema_catalog_reports_complete_registry() -> None:
     # receipt-result 1.5.0; ADR-051 decision 5: check-recorded 1.7.0 and receipt-document 1.4.0;
     # ADR-052: server-profile 1.0.0; ADR-053: the seven REST v1 documents (rest-*)
     # ADR-054: config 1.4.0 (the [server] table), content-forgotten 1.0.0 (U20)
-    # main (#1348): receipt-result 1.4.1 and version-manifest 2.3.1
-    assert SCHEMA_MEMBER_COUNT == 266
+    # main (#1348): receipt-result 1.4.1 and version-manifest 2.3.1; #1172: reviewer-cache-report
+    # 1.0.0
+    assert SCHEMA_MEMBER_COUNT == 267
     assert len(catalog.documents) == SCHEMA_MEMBER_COUNT
 
     paths = tuple(document.relative_path for document in catalog.documents)
@@ -3517,8 +3518,8 @@ def test_schema_catalog_record_shape_and_indexes_are_exact() -> None:
     # #1118: privacy-policy 1.3.0 (its 1.2.0 refs plus the 524,288 bound) and its control 2.9.0
     # admissions add 96.
     assert (
-        sum(_count_refs(document.json_schema) for document in catalog.documents) == 10_017
-    )  # main (#1348) +48 receipt-result 1.4.1 and +47 version-manifest 2.3.1 (each repeats
+        sum(_count_refs(document.json_schema) for document in catalog.documents) == 10_090
+    )  # #1172 +73 (reviewer-cache-report 1.0.0); main (#1348) +48 receipt-result 1.4.1 and +47 version-manifest 2.3.1 (each repeats
     # its predecessor); ADR-054 +15 (config 1.4.0: the 13 refs of 1.3.0, the [server] table and its code_copy);
     # ADR-054 +2 (control 2.10.0: the code_copy request body in its request and result
     # branches); ADR-053 +10 (the REST v1 documents: the session's status and revision, the error's, the
@@ -3572,8 +3573,9 @@ def test_schema_name_derivation_and_version_maps_are_exact() -> None:
     event_versions = event_schema_versions(catalog)
     assert request_versions is catalog.request_result_versions
     assert event_versions is catalog.event_schema_versions
-    # #1118 unit 2: reviewer-reply; #1119: batch, ai-status; ADR-051: server-target-status
-    assert len(request_versions) == 66
+    # #1118 unit 2: reviewer-reply; #1119: batch, ai-status; ADR-051: server-target-status;
+    # #1172: reviewer-cache-report
+    assert len(request_versions) == 67
     assert (
         len(event_versions) == 31
     )  # #1239 contact_expectation_declared; ADR-054 content_forgotten

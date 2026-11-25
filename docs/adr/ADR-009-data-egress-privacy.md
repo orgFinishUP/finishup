@@ -998,7 +998,10 @@ such as `parser.token = Token.EOF`, a lower-case object property such as `token:
 Token.ConstKeyword`, or a lower-case Python `token = node.token` assignment inside a valid
 function. Bare dotted assignments such as `TOKEN=opaque.value` or `token=opaque.value`, call-shaped
 values such as `password=functionName()`, quoted lookalikes, mixed-language text, and malformed
-source remain heuristic matches. The owner-controlled privacy policy is unchanged. The deferred
+source remain heuristic matches. The Python exemption covers only the assignment's own bytes,
+located by the line ends Python itself counts (`\r\n`, `\r`, `\n`), so a form feed or Unicode
+line separator earlier in the source cannot move it onto other text (#1458). The owner-controlled
+privacy policy is unchanged. The deferred
 heuristic opt-out remains out of scope here; the 2026-10-07 credential-heuristic opt-out amendment
 below adds it. *Amended 2026-10-31 (#1248):* marker exemption, conversation-depth hits, value
 ends and slicing follow the amendment of that date at the end of this ADR.

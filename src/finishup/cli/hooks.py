@@ -10,9 +10,9 @@ from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
 from types import MappingProxyType
-from typing import BinaryIO, Final, Literal, Protocol, cast
+from typing import TYPE_CHECKING, BinaryIO, Final, Literal, Protocol, cast
 
-from finishup import __version__
+import finishup
 from finishup.adapters.integrations.codex_lifecycle import (
     LifecycleMapping,
     acquire_session_lock,
@@ -22,6 +22,7 @@ from finishup.adapters.integrations.codex_lifecycle import (
     load_mapping,
     mapping_from_start_ids,
     mapping_path,
+    pending_mapping_paths,
     queue_mapping_store,
     scoped_child_session_id,
     store_mapping,
@@ -41,15 +42,19 @@ from finishup.cli.hook_io import (
 from finishup.cli.hook_io import (
     stdout_json as _stdout_json,
 )
-from finishup.cli.render import render_hook_recovery_suffix
 from finishup.domain.compaction_recap import RECAP_CONTEXT_LIMIT, RecapFacts
 from finishup.domain.finishup_tools import FINISHUP_SCOPED_TOOL_PREFIXES
-from finishup.ports.control import ControlClientKind, ControlError, WorkspaceLocator
 from finishup.protocol.canonical import JsonValue, strict_json_parse
 from finishup.protocol.errors import ProtocolValueError, PublicErrorCode
 from finishup.protocol.ids import IdKind, is_valid_id, new_id
-from finishup.protocol.models import OperationFailureModel, StatusRequest
-from finishup.service.client import connect_service
+from finishup.protocol.recovery import continuation_for_local_reason, continuation_for_reason
+
+if TYPE_CHECKING:
+    # Every hook process imports this module (observation lanes reach it for child identity and
+    # start-mapping recovery), so the pydantic protocol models and the control port load only
+    # inside the status read that needs them; ``connect_service`` resolves through ``__getattr__``.
+    from finishup.ports.control import ControlClientKind, WorkspaceLocator
+    from finishup.protocol.models import OperationFailureModel, StatusRequest
 
 __all__ = [
     "INACTIVE_CONTEXT",
@@ -71,12 +76,54 @@ __all__ = [
 ]
 
 
+def __getattr__(name: str) -> object:
+    """Resolve the service-client seam on demand.
+
+    ``connect_service`` stays a patchable module attribute (tests bind it to a forbidden
+    connector) without ``finishup.service.client`` being imported by hooks that never connect.
+    """
+
+    if name == "connect_service":
+        from finishup.service.client import connect_service
+
+        return connect_service
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def _connect_service() -> Callable[..., Awaitable[object]]:
+    """Return the connector, honoring a module-attribute override."""
+
+    override = globals().get("connect_service")
+    if override is not None:
+        return cast(Callable[..., Awaitable[object]], override)
+    from finishup.service.client import connect_service
+
+    return connect_service
+
+
+def _hook_recovery_suffix(reason: str) -> str:
+    """``render_hook_recovery_suffix`` for a hook-local constant, without the render graph.
+
+    ``finishup.cli.render`` pulls in the protocol models; the suffix needs only the recovery
+    registry. A unit test pins this to the renderer for every registered reason.
+    """
+
+    token = continuation_for_local_reason(reason)
+    if token is None:
+        token = continuation_for_reason(reason, operation_kind=None)
+    if token is None:
+        return ""
+    return f" Continuation: {token}."
+
+
 class _StatusClient(Protocol):
     async def status(self, request: StatusRequest, *, deadline_ms: int | None = None) -> object: ...
 
     async def close(self) -> None: ...
 
 
+# ``ControlClientKind`` and ``StatusRequest`` are imported for type checking only, so this alias's
+# value and the ``_status_request`` annotations resolve statically, not by runtime introspection.
 type ServiceConnector = Callable[[ControlClientKind], Awaitable[_StatusClient]]
 type AsyncRunner = Callable[[Callable[[], Awaitable[object]]], object]
 type StartBindOutcome = Literal[
@@ -167,7 +214,7 @@ _UNAVAILABLE_CONTEXT: Final = (
 )
 _LOCKED_CONTEXT: Final = (
     "FinishUP vault is locked for this mapped session; no live receipt can be promised."
-    + render_hook_recovery_suffix("vault_locked")
+    + _hook_recovery_suffix("vault_locked")
 )
 
 
@@ -789,20 +836,17 @@ def _pending_mapping_snapshot(
     """
 
     try:
-        mapping = mapping_path(codex_session_id, _state=_state)
-        pending = mapping.parent / f".{codex_session_id}.pending.json"
-        applying = pending.with_name(pending.name + ".applying")
         from finishup.adapters.integrations.codex_lifecycle import (
             _load_pending_mapping_operation,  # pyright: ignore[reportPrivateUsage]
         )
 
-        candidates = tuple(
-            candidate
-            for candidate in (applying, pending)
-            if candidate.exists() or candidate.is_symlink()
-        )
+        candidates = pending_mapping_paths(codex_session_id, _state=_state)
         if not candidates:
             return _PendingMappingSnapshot(False, None)
+        if len(candidates) > 2:
+            # A legacy-layout queue left by an older writer plus a current one:
+            # defer to the recovery owner, which replays them in order.
+            return _PendingMappingSnapshot(True, None)
         operations = tuple(
             _load_pending_mapping_operation(
                 codex_session_id,
@@ -981,11 +1025,8 @@ def _mapping_state_before_start(
                     _session_lock_owned=True,
                 )
             mapping = load_mapping(codex_session_id, _state=_state)
-            path = mapping_path(codex_session_id, _state=_state)
-            pending = path.parent / f".{codex_session_id}.pending.json"
-            applying = pending.with_name(pending.name + ".applying")
-            return mapping, (not owned) or any(
-                item.exists() or item.is_symlink() for item in (pending, applying)
+            return mapping, (not owned) or bool(
+                pending_mapping_paths(codex_session_id, _state=_state)
             )
     except Exception:
         # An unreadable lock or pending marker cannot establish that the raw
@@ -1257,11 +1298,7 @@ def recover_pending_start_mapping(
     """
 
     try:
-        mapping = mapping_path(codex_session_id, _state=_state)
-        pending = mapping.parent / f".{codex_session_id}.pending.json"
-        applying = pending.with_name(pending.name + ".applying")
-        paths = (pending, applying)
-        if not any(path.exists() or path.is_symlink() for path in paths):
+        if not pending_mapping_paths(codex_session_id, _state=_state):
             return PendingMappingRecovery(applied=False, pending=False)
         lifecycle_lock = (
             contextlib.nullcontext(True)
@@ -1276,7 +1313,7 @@ def recover_pending_start_mapping(
                 if not apply_pending_mapping(codex_session_id, _state=_state):
                     break
                 applied = True
-        still_pending = any(path.exists() or path.is_symlink() for path in paths)
+        still_pending = bool(pending_mapping_paths(codex_session_id, _state=_state))
         return PendingMappingRecovery(applied=applied, pending=still_pending)
     except Exception:
         return PendingMappingRecovery(applied=False, pending=True)
@@ -1406,6 +1443,8 @@ def _status_request(
     limit: str = "1",
     cursor: str | None = None,
 ) -> StatusRequest:
+    from finishup.protocol.models import StatusRequest
+
     return StatusRequest.model_validate(
         {
             "protocol_version": "0.1",
@@ -1418,7 +1457,7 @@ def _status_request(
             "client": {
                 # Frozen legacy identifier (ADR-048): the client kind wire enum value.
                 "kind": "yoetz_cli",
-                "version": __version__,
+                "version": finishup.__version__,
                 "integration": "local_cli",
             },
             "session_id": mapping.finishup_session_id,
@@ -1443,6 +1482,8 @@ def bound_connector(
     same locator `start` does. An unrepresentable locator is sent as none; the
     daemon then answers with its typed reason instead of the hook guessing.
     """
+
+    from finishup.ports.control import WorkspaceLocator
 
     locator: WorkspaceLocator | None
     try:
@@ -1572,6 +1613,7 @@ async def _read_recap_facts(
     """
 
     from finishup.cli.compaction_recap import recap_facts_from_status, recap_with_deliverables
+    from finishup.protocol.models import OperationFailureModel
 
     try:
         facts = recap_facts_from_status(
@@ -1640,10 +1682,13 @@ async def _read_status(
     closed reason, so the context names it.
     """
 
+    from finishup.ports.control import ControlClientKind, ControlError
+    from finishup.protocol.models import OperationFailureModel
+
     client: _StatusClient | None = None
     try:
         connector = (
-            bound_connector(connect_service, workspace_locator) if connect is None else connect
+            bound_connector(_connect_service(), workspace_locator) if connect is None else connect
         )
         connected = await connector(ControlClientKind.CLI)
         client = connected

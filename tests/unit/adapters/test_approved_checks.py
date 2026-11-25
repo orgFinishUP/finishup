@@ -19,15 +19,18 @@ from finishup.adapters.approved_checks import (
     ApprovedCheckApproval,
     ApprovedCheckCommand,
     ApprovedCheckOutcome,
+    ApprovedCheckResult,
     ApprovedCheckRunner,
     ApprovedCheckStatus,
+    _check_exit_status,  # pyright: ignore[reportPrivateUsage]
     _reap_approved_check_process,  # pyright: ignore[reportPrivateUsage]
     _reap_posix_group_members,  # pyright: ignore[reportPrivateUsage]
     _taskkill_tree,  # pyright: ignore[reportPrivateUsage]
     approval_commitment,
 )
+from finishup.adapters.check_sandbox import LinuxCheckSandbox
 from finishup.adapters.workspace_inspect import open_inspect_workspace
-from finishup.ports.check_sandbox import CheckSandboxLaunch, CheckSandboxStatus
+from finishup.ports.check_sandbox import CheckSandboxLaunch, CheckSandboxPort, CheckSandboxStatus
 
 _TRUE = shutil.which("true") or "/usr/bin/true"
 
@@ -482,3 +485,54 @@ def test_completed_check_tears_down_leftover_group_members(tmp_path: Path) -> No
         os.kill(descendant_pid, 0)
     with pytest.raises(ProcessLookupError):
         os.killpg(group_id, 0)
+
+
+def _run_script(tmp_path: Path, body: str, sandbox: CheckSandboxPort) -> ApprovedCheckResult:
+    script_path = tmp_path / "check.sh"
+    script_path.write_text(body, encoding="ascii")
+    approval = _approval(("/bin/sh", str(script_path)), timeout_seconds=5.0)
+    runner = ApprovedCheckRunner(
+        {approval.approval_commitment: approval},
+        sandbox=sandbox,
+    )
+    return runner.run(
+        ApprovedCheckCommand(
+            workspace=open_inspect_workspace(tmp_path),
+            approval=approval,
+            subject_state_digest="sha256:" + "3" * 64,
+        )
+    )
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX signal exit")
+def test_check_ended_by_a_signal_is_a_failed_nonzero_exit(tmp_path: Path) -> None:
+    # A check that dies by a signal failed; it is not a protocol error. The exit status follows
+    # the shell's ``128 + signal`` convention so it stays inside the result's 0..255 range.
+    result = _run_script(tmp_path, "kill -TERM $$\n", _ReadyCheckSandbox())
+    assert result.status is ApprovedCheckStatus.FAILED
+    assert result.outcome is ApprovedCheckOutcome.NONZERO_EXIT
+    assert result.exit_status == 128 + signal.SIGTERM
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="bubblewrap check sandbox")
+def test_check_that_signals_its_group_under_bubblewrap_is_a_failed_nonzero_exit(
+    tmp_path: Path,
+) -> None:
+    sandbox = LinuxCheckSandbox()
+    if sandbox.availability().status is not CheckSandboxStatus.READY:
+        pytest.skip("bubblewrap sandbox unavailable")
+    # The sandbox leader shares the check's process group, so it dies by the same signal.
+    result = _run_script(tmp_path, "kill -TERM 0\n", sandbox)
+    assert result.status is ApprovedCheckStatus.FAILED
+    assert result.outcome is ApprovedCheckOutcome.NONZERO_EXIT
+    assert result.exit_status == 128 + signal.SIGTERM
+
+
+@pytest.mark.parametrize(
+    ("returncode", "expected"),
+    [(0, 0), (1, 1), (255, 255), (-9, 137), (-15, 143), (-200, 255), (0xC0000005, None)],
+)
+def test_check_exit_status_stays_inside_the_result_range(
+    returncode: int, expected: int | None
+) -> None:
+    assert _check_exit_status(returncode) == expected

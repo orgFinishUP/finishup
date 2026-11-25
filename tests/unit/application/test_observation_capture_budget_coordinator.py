@@ -27,6 +27,7 @@ from finishup.domain.observation import (
     ObservationIngestRequest,
     ObservationIngestResult,
     ObservationSource,
+    observation_capture_part_descriptors,
 )
 from finishup.domain.values import JsonObject, Timestamp
 from finishup.ports.observation import TaskObservationPort
@@ -393,3 +394,116 @@ async def test_structural_row_keeps_both_capture_budget_gaps(tmp_path: Path, sta
         ObservationGapCode.CAPTURE_BUDGET_EXHAUSTED.value,
         ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value,
     )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("capture_only", [False, True])
+async def test_finalize_budget_refusal_keeps_capture_budget_gap(
+    tmp_path: Path, capture_only: bool
+) -> None:
+    coordinator, store, session_commitment, mapping = _fixture(tmp_path)
+    envelope = _envelope(session_commitment, identity="capture-budget-finalize")
+    staging_ticket = replace(
+        _reservation_ticket(mapping.finishup_task_id),
+        workspace_commitment=coordinator.local.workspace_commitment(str(tmp_path.resolve())),
+        finishup_session_id=mapping.finishup_session_id,
+        session_commitment=session_commitment,
+        source_identity=envelope.source_identity,
+        cursor=envelope.cursor,
+        logical_identity="capture-budget-finalize",
+    )
+    chunk = _chunk()
+    manifest = ObservationContentManifest(
+        object_id=new_id(IdKind.OBJECT),
+        envelope_digest=_DIGEST,
+        content_kind=chunk.content_kind,
+        part_index=0,
+        part_count=1,
+        redacted=False,
+        content_digest=_DIGEST,
+        content_bytes=len(chunk.content),
+        correlation_identity=chunk.correlation_identity,
+        source_commitment=chunk.source_commitment,
+    )
+    finalized: list[object] = []
+
+    def finalize_capture_ticket(staging: object, complete: object) -> None:
+        # A manifest set bound before its ticket was active was never charged, so the
+        # durable finalize boundary refuses it once the workspace backlog is over budget.
+        finalized.append((staging, complete))
+        raise PublicOperationError(
+            PublicErrorCode.LIMIT_EXCEEDED,
+            "Observation captured-content byte budget is exhausted.",
+            retryable=False,
+        )
+
+    store.finalize_capture_ticket = finalize_capture_ticket  # type: ignore[attr-defined]
+
+    class _BudgetCoordinator(ObservationCoordinator):
+        async def _native_capture_context(  # type: ignore[override]
+            self, *args: object, **kwargs: object
+        ) -> object:
+            del args, kwargs
+            return SimpleNamespace(
+                native_source=True,
+                content_identity="capture-budget-finalize",
+                content_authorized=True,
+                content_authorization_missing=False,
+                content_capture_blocked=False,
+                capture_ticket_revoked=False,
+                capture_fence=None,
+                fence_generation=_DIGEST,
+                capture_staging_ticket=staging_ticket,
+                staged_ticket=None,
+                expected_capture_parts=observation_capture_part_descriptors((chunk,)),
+                rejection_reason=None,
+            )
+
+        async def _capture_content(  # type: ignore[override]
+            self, *args: object, **kwargs: object
+        ) -> object:
+            del args, kwargs
+            # Every part was admitted and stored; only the ticket finalize is refused.
+            self._capture_budget_exhausted = False
+            return (manifest,), (), False, False
+
+        async def _append_materialized(self, *args: object, **kwargs: object) -> None:
+            del args, kwargs
+            return None
+
+        async def _enqueue_verification(self, *args: object, **kwargs: object) -> None:
+            del args, kwargs
+
+        async def _run_advice(self, *args: object, **kwargs: object) -> None:
+            del args, kwargs
+
+    budget_coordinator = _BudgetCoordinator(
+        runtime=coordinator.runtime,
+        local=coordinator.local,
+        clock=coordinator.clock,
+        ids=coordinator.ids,
+        state_root=tmp_path,
+        mapping_loader=coordinator.mapping_loader,
+    )
+    result = await budget_coordinator.ingest_request(
+        ObservationIngestRequest(
+            codex_session_id=mapping.codex_session_id,
+            envelope=envelope,
+            content_chunks=(chunk,),
+            capture_only=capture_only,
+        )
+    )
+
+    assert len(finalized) == 1
+    assert len(store.tombstoned) == 1
+    if capture_only:
+        assert result.disposition is ObservationIngestDisposition.REJECTED
+        assert result.reason == ObservationGapCode.CAPTURE_BUDGET_EXHAUSTED.value
+        assert store.envelopes == []
+    else:
+        assert result.disposition is ObservationIngestDisposition.ACCEPTED
+        assert len(store.envelopes) == 1
+        assert store.envelopes[0].gap_codes == (
+            ObservationGapCode.CAPTURE_BUDGET_EXHAUSTED.value,
+            ObservationGapCode.CONTENT_CAPTURE_UNAVAILABLE.value,
+        )

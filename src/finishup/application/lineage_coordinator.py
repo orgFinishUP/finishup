@@ -128,8 +128,8 @@ __all__ = [
 
 
 _LINEAGE_EVENT_SCHEMA_VERSION: Final = "1.0.0"
-_LINEAGE_OPERATION_DOMAIN: Final = "yoetz/lineage-manifest-operation/v1"
-_LINEAGE_EVENT_DOMAIN: Final = "yoetz/lineage-manifest-event/v1"
+_LINEAGE_OPERATION_DOMAIN: Final = "yoetz/lineage-manifest-operation/v2"
+_LINEAGE_EVENT_DOMAIN: Final = "yoetz/lineage-manifest-event/v2"
 
 # C9's three accepted channels.  The tuple is canonical and intentionally contains no caller
 # supplied text; a source gate receives the complete set on every child read.
@@ -624,10 +624,16 @@ class LineageManifestCoordinator:
         # swept".  Once an aggregate exists, identical sweeps remain idempotent.
         if current.source_event_id is not None and candidate.digest == current.digest:
             return LineageSweepResult(current, False)
-        append_result = await self._append(parent_runtime, payload, parent_records)
+        append_result = await self._append(
+            parent_runtime, payload, parent_records, current.source_event_id
+        )
         refreshed = await self._load_records(parent_runtime)
         manifest = lineage_manifest_from_records(refreshed)
-        return LineageSweepResult(manifest, True, append_result)
+        changed = (
+            manifest.digest == candidate.digest
+            and manifest.source_event_id != current.source_event_id
+        )
+        return LineageSweepResult(manifest, changed, append_result)
 
     async def sweep_parent_of(self, child_task_id: str) -> LineageSweepResult | None:
         """Refresh the direct parent after a child event reaches this service.
@@ -1076,12 +1082,19 @@ class LineageManifestCoordinator:
         parent_runtime: TaskRuntime,
         payload: ChildDependenciesRecordedPayload,
         parent_records: tuple[LedgerRecord, ...],
+        replaced_event_id: str | None,
     ) -> AppendResult:
         manifest = manifest_from_payload(payload)
+        # The identity names the transition, not only the content: the manifest event it replaces
+        # plus the new aggregate digest.  A retry of the same transition replays idempotently,
+        # while an aggregate that returns to an earlier state (A, then B, then A) gets a fresh
+        # operation and event so it becomes the latest recorded manifest again.
+        replaced = "" if replaced_event_id is None else str(replaced_event_id)
         request_digest_value = canonical_digest(
             {
                 "domain": _LINEAGE_OPERATION_DOMAIN,
                 "parent_task_id": parent_runtime.task_id,
+                "replaced_event_id": replaced,
                 "manifest_digest": manifest.digest,
             }
         )
@@ -1092,6 +1105,7 @@ class LineageManifestCoordinator:
                 {
                     "domain": _LINEAGE_EVENT_DOMAIN,
                     "parent_task_id": parent_runtime.task_id,
+                    "replaced_event_id": replaced,
                     "manifest_digest": manifest.digest,
                 }
             ),

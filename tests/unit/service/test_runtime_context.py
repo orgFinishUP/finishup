@@ -835,6 +835,110 @@ async def test_runtime_writer_connection_ceiling_is_explicit_and_actionable() ->
     await runtime.close()
 
 
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "policy",
+    [
+        RuntimeCachePolicy(
+            max_idle_tasks=4,
+            max_opening_tasks=2,
+            max_open_bundle_tasks=4,
+            max_writer_connections=1,
+        ),
+        RuntimeCachePolicy(
+            max_idle_tasks=4,
+            max_opening_tasks=2,
+            max_open_bundle_tasks=4,
+            max_writer_connections=4,
+            max_writer_connections_per_repository=1,
+        ),
+    ],
+    ids=["writer_connections", "repository_writer_connections"],
+)
+async def test_refused_reopen_still_closes_the_evicted_cached_entry(
+    policy: RuntimeCachePolicy,
+) -> None:
+    """A cached entry evicted for a wider reopen is closed even when capacity refuses the reopen."""
+
+    repo = "hmac-sha256:" + "d" * 64
+    routes: list[TaskRoute] = []
+    for offset in range(2):
+        task = _id(IdKind.TASK, 500 + offset)
+        routes.append(
+            TaskRoute(
+                task,
+                _id(IdKind.SESSION, 600 + offset),
+                f"tasks/{task}",
+                1,
+                TaskRouteState.ACTIVE,
+                canonical_digest(
+                    {
+                        "task_id": task,
+                        "bundle_relpath": f"tasks/{task}",
+                        "route_generation": 1,
+                    }
+                ),
+                repository_privacy_commitment=repo,
+            )
+        )
+
+    class _MultiCatalog:
+        generation = 3
+
+        async def resolve_route(self, session_id: str) -> TaskRoute | None:
+            return next((route for route in routes if route.session_id == session_id), None)
+
+        async def session_binding(self, session_id: str) -> SessionBinding | None:
+            del session_id
+            return None
+
+    first_route, writer = _route()
+    harness = _Harness(1, first_route, writer)
+    runtime = await open_local_bundle_runtime(
+        _context(frozenset(RuntimeCapability)),
+        _MultiCatalog(),
+        _Vault(),
+        harness.factories(),
+        _Diagnostics(),
+        object(),
+        policy,
+    )
+    # Task A is cached idle with read-only authority.
+    read_a = await runtime.route(
+        RouteCommand(
+            routes[0].session_id,
+            writer,
+            RouteAccess.STRUCTURAL_READ,
+            frozenset({RuntimeCapability.STRUCTURAL_READ}),
+        )
+    )
+    await runtime.release(read_a)
+    # Task B uses up the capacity a write reopen of task A would need.
+    write_b = await runtime.route(
+        RouteCommand(
+            routes[1].session_id, writer, RouteAccess.WRITE, frozenset({RuntimeCapability.WRITE})
+        )
+    )
+    assert harness.opens == 2
+    with pytest.raises(PublicOperationError) as busy:
+        await runtime.route(
+            RouteCommand(
+                routes[0].session_id,
+                writer,
+                RouteAccess.WRITE,
+                frozenset({RuntimeCapability.WRITE}),
+            )
+        )
+    assert busy.value.code is PublicErrorCode.BUNDLE_BUSY
+    assert busy.value.retryable is True
+    # The evicted read-only entry is no longer reachable from the cache, so it must already be
+    # closed; nothing later in the runtime's lifecycle could close it.
+    assert harness.closes == 1
+    await runtime.release(write_b)
+    await runtime.close()
+    assert harness.closes == harness.opens == 2
+
+
 def test_context_is_constant_redacted_and_not_serializable() -> None:
     context = _context(frozenset({RuntimeCapability.STRUCTURAL_READ}))
     assert repr(context) == "ServiceRuntimeContext(<redacted>)"

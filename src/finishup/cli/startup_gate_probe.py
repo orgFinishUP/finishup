@@ -10,8 +10,37 @@ from typing import Final
 from finishup.protocol.canonical import JsonValue
 
 # The bound on the probe's connection and the task's status (design v2 section 8.9); its imports
-# come before it. ``server test`` compares a new process's connection and status with it.
+# and the build of its status models (``build_status_models``) come before it. ``server test``
+# compares a new process's connection and status with it.
 STARTUP_GATE_SECONDS: Final = 0.65
+
+
+def build_status_models() -> None:
+    """Finish building the models one compact status exchange builds on first use.
+
+    The protocol models build on first use (``protocol.deferred_build``), and this process is new
+    for every gate decision. Left to first use, four builds would run while the bound is open:
+    the request's when it is validated, the result's when the reply is decoded, the compact
+    page's when the status view routes the page to it, and the success model's when its
+    validator serializes it to check it against the schema. Building them first keeps the bound
+    for the connection and the status, as it was when importing the models built them all.
+    Every other model the exchange touches validates inside one of these four. A reply that is
+    not a successful compact page is not ready whether or not the bound holds, so nothing is
+    built for it, and building every model would cost this process most of what deferring them
+    saved.
+    """
+
+    from finishup.protocol.deferred_build import ensure_built
+    from finishup.protocol.models import (
+        StatusCompactPageModel,
+        StatusRequest,
+        StatusResult,
+        StatusSuccessModel,
+    )
+
+    # Definition order, as an import-time build ran: a model is complete before one that holds it.
+    for model in (StatusRequest, StatusCompactPageModel, StatusSuccessModel, StatusResult):
+        ensure_built(model)
 
 
 async def probe(request: Mapping[str, JsonValue]) -> bool:
@@ -26,6 +55,7 @@ async def probe(request: Mapping[str, JsonValue]) -> bool:
     route, workspace = request.get("route"), request.get("workspace")
     if not isinstance(route, list) or len(route) != 3 or not isinstance(workspace, str):
         return False
+    build_status_models()
     client = None
     try:
         with anyio.fail_after(STARTUP_GATE_SECONDS):

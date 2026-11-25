@@ -9,10 +9,16 @@ from typing import TYPE_CHECKING
 from finishup.domain.events import ActionKind, LedgerRecord, is_observation_authored
 from finishup.domain.values import ActionId, EventId, ObligationId, ResultId
 from finishup.kernel.projections import ProjectionState
-from finishup.protocol.models import StatusCommandAttemptModel
 
 if TYPE_CHECKING:
+    import finishup.protocol.models as _protocol_models
     from finishup.kernel.task_facts import ObservedCommandRun
+else:
+    from finishup.protocol.lazy_module import LazyModule
+
+    # The protocol models load when a command attempt is first built, so a process that only
+    # imports this module (an observation hook refreshing its advice) never imports pydantic.
+    _protocol_models = LazyModule("finishup.protocol.models")
 
 
 def same_requested_path(requested: str, other: str) -> bool:
@@ -21,7 +27,9 @@ def same_requested_path(requested: str, other: str) -> bool:
     ``attempted_items`` and a requested value used to match only byte for byte, so
     ``out/build.log`` never matched ``/app/out/build.log`` and ``./solve.sage`` never matched
     ``solve.sage`` (retro S: ``requested_item_never_attempted`` on files it had written). Both
-    are normalised lexically (``.`` and ``..`` folded, no filesystem access). Two absolute paths
+    are normalised lexically (``.`` and ``..`` folded, repeated leading slashes collapsed to one,
+    no filesystem access): ``normpath`` keeps exactly two leading slashes, which POSIX leaves
+    implementation-defined but Linux and macOS read as one. Two absolute paths
     match only when equal; otherwise the relative one matches when its components are the tail of
     the other's. The tail rule trades a rare false match (two files of one name in different
     directories) for the common true one (the agent's relative spelling of an absolute value).
@@ -31,6 +39,10 @@ def same_requested_path(requested: str, other: str) -> bool:
         return False
     first = posixpath.normpath(requested.strip())
     second = posixpath.normpath(other.strip())
+    if first.startswith("//"):
+        first = "/" + first.lstrip("/")
+    if second.startswith("//"):
+        second = "/" + second.lstrip("/")
     if first == second:
         return True
     first_absolute, second_absolute = first.startswith("/"), second.startswith("/")
@@ -78,7 +90,7 @@ def attempted_items_for_obligation(
 
 def command_attempts(
     state: ProjectionState, records: tuple[LedgerRecord, ...], obligation_id: ObligationId
-) -> tuple[StatusCommandAttemptModel, ...]:
+) -> tuple[_protocol_models.StatusCommandAttemptModel, ...]:
     """Compare only explicitly linked observations; unrelated commands prove nothing.
 
     A cooperative action may name an observed action event as a causal parent. An obligation's
@@ -112,7 +124,7 @@ def command_attempts(
         row.event_id: row for row in records if row.ledger.ingestion_sequence <= state.frontier
     }
     cooperative = cooperative_event_ids_from_records(by_event.values())
-    output: list[StatusCommandAttemptModel] = []
+    output: list[_protocol_models.StatusCommandAttemptModel] = []
     for index, requested in enumerate(obligation.requested_items):
         if requested.item_kind.value != "command":
             continue
@@ -201,7 +213,7 @@ def command_attempts(
         if len(assertions) > 64 or len(observed) > 64:
             relation = "unknown"
         output.append(
-            StatusCommandAttemptModel.model_validate(
+            _protocol_models.StatusCommandAttemptModel.model_validate(
                 {
                     "requested_item_index": str(index),
                     "relation": relation,

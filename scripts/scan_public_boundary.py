@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import lzma
 import os
 import re
 import stat
@@ -19,6 +20,7 @@ import subprocess
 import sys
 import tarfile
 import zipfile
+import zlib
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -118,6 +120,20 @@ _MAX_MEMBER_COUNT: Final = 200_000
 _MAX_COMPRESSION_RATIO: Final = 200
 _READ_CHUNK_BYTES: Final = 1_048_576
 
+# Everything a truncated or corrupt archive can raise while it is listed or read: a bad header, a
+# stream that ends early, a corrupt compressed stream, or a failed read. Each one is reported as an
+# unreadable archive, never as a traceback.
+_ARCHIVE_STREAM_ERRORS: Final = (EOFError, OSError, zlib.error, lzma.LZMAError)
+_TAR_READ_ERRORS: Final = (tarfile.TarError, *_ARCHIVE_STREAM_ERRORS)
+# zipfile also raises NotImplementedError for an unsupported compression method and RuntimeError
+# for an encrypted member; neither can be scanned.
+_ZIP_READ_ERRORS: Final = (
+    zipfile.BadZipFile,
+    NotImplementedError,
+    RuntimeError,
+    *_ARCHIVE_STREAM_ERRORS,
+)
+
 # Reviewed public rule config, committed beside the script. Patterns are bounded, anchored where
 # practical, and public (synthetic examples only, never real credentials).
 _DEFAULT_RULES: Final[tuple[BoundaryRule, ...]] = (
@@ -147,7 +163,8 @@ _DEFAULT_RULES: Final[tuple[BoundaryRule, ...]] = (
         "medium",
         "publication",
         "content",
-        r"(?<![\w/.])[A-Za-z]:\\\\Users\\\\[A-Za-z0-9_.\-]+",
+        # One backslash is the literal path; two are its JSON or source-code escape.
+        r"(?<![\w/.])[A-Za-z]:\\{1,2}Users\\{1,2}[A-Za-z0-9_.\-]+",
         "A maintainer's absolute Windows home path must never reach a public artifact.",
         "release-maintainer",
     ),
@@ -375,7 +392,11 @@ def _enumerate_source(root: Path) -> tuple[FileEntry, ...]:
     except (OSError, subprocess.SubprocessError) as exc:
         raise BoundaryScanError("source_tree_listing_failed", detail=str(root)) from exc
 
-    names = [name for name in completed.stdout.decode("utf-8", errors="strict").split("\0") if name]
+    try:
+        listing = completed.stdout.decode("utf-8", errors="strict")
+    except UnicodeDecodeError as exc:
+        raise BoundaryScanError("source_tree_listing_failed", detail=str(root)) from exc
+    names = [name for name in listing.split("\0") if name]
     entries: list[FileEntry] = []
     aggregate = 0
     for name in sorted(names, key=lambda item: item.encode("utf-8")):
@@ -384,9 +405,7 @@ def _enumerate_source(root: Path) -> tuple[FileEntry, ...]:
         candidate = root / name
         if candidate.is_symlink() or not candidate.is_file():
             raise BoundaryScanError("unscanned_tracked_entry", detail=name)
-        data = candidate.read_bytes()
-        if len(data) > _MAX_FILE_BYTES:
-            raise BoundaryScanError("file_too_large", detail=name)
+        data = _read_regular_file(candidate, name, unscanned="unscanned_tracked_entry")
         aggregate += len(data)
         if aggregate > _MAX_AGGREGATE_BYTES:
             raise BoundaryScanError("aggregate_too_large", detail=str(root))
@@ -397,27 +416,47 @@ def _enumerate_source(root: Path) -> tuple[FileEntry, ...]:
 
 
 def _enumerate_evidence(root: Path) -> tuple[FileEntry, ...]:
-    if not root.is_dir():
+    """Enumerate one evidence directory without following symlinks.
+
+    A symlink at any depth (to a file or a directory), a symlinked root, an unreadable directory,
+    or any entry that is neither a directory nor a regular file makes the scan incomplete instead
+    of being skipped.
+    """
+
+    if root.is_symlink() or not root.is_dir():
         raise BoundaryScanError("evidence_dir_missing", detail=str(root))
+    files: list[Path] = []
+    pending: list[Path] = [root]
+    while pending:
+        directory = pending.pop()
+        try:
+            with os.scandir(directory) as iterator:
+                for child in iterator:
+                    if child.is_symlink():
+                        raise BoundaryScanError("unscanned_evidence_entry", detail=child.path)
+                    if child.is_dir(follow_symlinks=False):
+                        pending.append(Path(child.path))
+                    elif child.is_file(follow_symlinks=False):
+                        files.append(Path(child.path))
+                    else:
+                        raise BoundaryScanError("unscanned_evidence_entry", detail=child.path)
+        except BoundaryScanError:
+            raise
+        except OSError as exc:
+            raise BoundaryScanError("unscanned_evidence_entry", detail=str(directory)) from exc
+        if len(files) > _MAX_MEMBER_COUNT:
+            raise BoundaryScanError("member_count_exceeded", detail=str(root))
     entries: list[FileEntry] = []
     aggregate = 0
-    for candidate in sorted(root.rglob("*")):
-        if candidate.is_dir():
-            continue
-        if candidate.is_symlink():
-            raise BoundaryScanError("unscanned_evidence_entry", detail=str(candidate))
+    for candidate in sorted(files):
         relative = candidate.relative_to(root).as_posix()
         if not _is_safe_member_path(relative):
             raise BoundaryScanError("unsafe_evidence_path", detail=relative)
-        data = candidate.read_bytes()
-        if len(data) > _MAX_FILE_BYTES:
-            raise BoundaryScanError("file_too_large", detail=relative)
+        data = _read_regular_file(candidate, relative, unscanned="unscanned_evidence_entry")
         aggregate += len(data)
         if aggregate > _MAX_AGGREGATE_BYTES:
             raise BoundaryScanError("aggregate_too_large", detail=str(root))
         entries.append(FileEntry(relative_path=relative, size=len(data), data=data))
-    if len(entries) > _MAX_MEMBER_COUNT:
-        raise BoundaryScanError("member_count_exceeded", detail=str(root))
     return tuple(entries)
 
 
@@ -464,7 +503,7 @@ def _enumerate_runtime(root: Path) -> tuple[FileEntry, ...]:
         relative = candidate.relative_to(root).as_posix()
         if not _is_safe_member_path(relative):
             raise BoundaryScanError("unsafe_runtime_path", detail=relative)
-        data = _read_runtime_file(candidate, relative)
+        data = _read_regular_file(candidate, relative, unscanned="unscanned_runtime_entry")
         aggregate += len(data)
         if aggregate > _MAX_AGGREGATE_BYTES:
             raise BoundaryScanError("aggregate_too_large", detail=str(root))
@@ -472,8 +511,11 @@ def _enumerate_runtime(root: Path) -> tuple[FileEntry, ...]:
     return tuple(entries)
 
 
-def _read_runtime_file(candidate: Path, relative: str) -> bytes:
-    """Read one regular runtime file through a nonblocking, no-follow descriptor."""
+def _read_regular_file(candidate: Path, relative: str, *, unscanned: str) -> bytes:
+    """Read one regular file through a nonblocking, no-follow descriptor.
+
+    Anything that is not a regular file when opened, or cannot be read, raises ``unscanned``.
+    """
 
     flags = os.O_RDONLY
     flags |= getattr(os, "O_NONBLOCK", 0)
@@ -481,11 +523,11 @@ def _read_runtime_file(candidate: Path, relative: str) -> bytes:
     try:
         descriptor = os.open(candidate, flags)
     except OSError as exc:
-        raise BoundaryScanError("unscanned_runtime_entry", detail=str(candidate)) from exc
+        raise BoundaryScanError(unscanned, detail=str(candidate)) from exc
     try:
         facts = os.fstat(descriptor)
         if not stat.S_ISREG(facts.st_mode):
-            raise BoundaryScanError("unscanned_runtime_entry", detail=str(candidate))
+            raise BoundaryScanError(unscanned, detail=str(candidate))
         if facts.st_size > _MAX_FILE_BYTES:
             raise BoundaryScanError("file_too_large", detail=relative)
         chunks: list[bytes] = []
@@ -502,7 +544,7 @@ def _read_runtime_file(candidate: Path, relative: str) -> bytes:
     except BoundaryScanError:
         raise
     except OSError as exc:
-        raise BoundaryScanError("unscanned_runtime_entry", detail=str(candidate)) from exc
+        raise BoundaryScanError(unscanned, detail=str(candidate)) from exc
     finally:
         os.close(descriptor)
 
@@ -544,7 +586,7 @@ def _enumerate_zip(path: Path) -> tuple[FileEntry, ...]:
                 if aggregate > _MAX_AGGREGATE_BYTES:
                     raise BoundaryScanError("aggregate_too_large", detail=str(path))
                 entries.append(FileEntry(relative_path=member, size=len(data), data=data))
-    except zipfile.BadZipFile as exc:
+    except _ZIP_READ_ERRORS as exc:
         raise BoundaryScanError("archive_unreadable", detail=str(path)) from exc
     return tuple(entries)
 
@@ -574,7 +616,7 @@ def _enumerate_tar(path: Path) -> tuple[FileEntry, ...]:
                 if aggregate > _MAX_AGGREGATE_BYTES:
                     raise BoundaryScanError("aggregate_too_large", detail=str(path))
                 entries.append(FileEntry(relative_path=member.name, size=len(data), data=data))
-    except tarfile.TarError as exc:
+    except _TAR_READ_ERRORS as exc:
         raise BoundaryScanError("archive_unreadable", detail=str(path)) from exc
     return tuple(entries)
 

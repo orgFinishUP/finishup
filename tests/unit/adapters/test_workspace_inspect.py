@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -17,6 +19,7 @@ from finishup.ports.subject_state import LocalWorkspaceHandle
 from finishup.ports.workspace_inspect import (
     WorkspaceInspectCommand,
     WorkspaceInspectLimitation,
+    WorkspaceInspectResult,
     WorkspaceInspectStatus,
 )
 
@@ -203,3 +206,35 @@ def test_unusable_workspace_payload_is_refused(tmp_path: Path) -> None:
     assert result.limitations == (WorkspaceInspectLimitation.UNSAFE_ROOT,)
     assert result.artifacts == ()
     assert result.selection_digest is None
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="named pipes need a POSIX host")
+@pytest.mark.parametrize("requested", ["pipe", "link", "via/pipe"])
+def test_fifo_is_refused_without_waiting_for_a_writer(tmp_path: Path, requested: str) -> None:
+    workspace = tmp_path / "workspace"
+    (workspace / "via").mkdir(parents=True)
+    fifo = workspace / "pipe"
+    os.mkfifo(fifo)
+    (workspace / "link").symlink_to("pipe")
+    (workspace / "via" / "pipe").symlink_to("../link")
+    handle = open_inspect_workspace(workspace)
+    results: list[WorkspaceInspectResult] = []
+    worker = threading.Thread(
+        target=lambda: results.append(
+            LocalWorkspaceInspectAdapter().inspect(WorkspaceInspectCommand(handle, (requested,)))
+        ),
+        daemon=True,
+    )
+    worker.start()
+    worker.join(timeout=10.0)
+    blocked = worker.is_alive()
+    if blocked:
+        # Release the blocked open so the worker thread does not outlive the test.
+        with contextlib.suppress(OSError):
+            os.close(os.open(fifo, os.O_WRONLY | os.O_NONBLOCK))
+        worker.join(timeout=10.0)
+    assert not blocked, "inspection waited for a writer on a named pipe"
+    (result,) = results
+    assert result.status is WorkspaceInspectStatus.REJECTED
+    assert result.limitations == (WorkspaceInspectLimitation.NOT_A_FILE,)
+    assert result.artifacts == ()

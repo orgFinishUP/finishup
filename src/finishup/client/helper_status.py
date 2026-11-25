@@ -178,6 +178,11 @@ HELPER_REASONS: Final = _UNAVAILABLE_REASONS | _STOPPED_REASONS
 _MAX_RECORD_BYTES: Final = 2_048
 _CORRELATION: Final = "err_"
 _STOP_POLL_SECONDS: Final = 0.05
+# How long a starting helper keeps trying the singleton lock before it reads another helper as
+# holding it: a client's probe (``_lock_held``) holds a shared flock for a moment only, a helper
+# for its whole life. Short, as the start holds the epoch fence meanwhile (``supersede_helper``).
+_LOCK_ACQUIRE_SECONDS: Final = 0.25
+_LOCK_ACQUIRE_POLL_SECONDS: Final = 0.005
 # The helper's scrubbed environment: what OpenSSH and the interpreter need, nothing secret and no
 # FinishUP variable. ``SSH_AUTH_SOCK`` lets OpenSSH use the owner's agent (the key stays in
 # OpenSSH). The XDG base directories decide where this machine's server registry lives, so the
@@ -624,7 +629,12 @@ class HelperLockBusy(Exception):
 
 
 class HelperLock:
-    """The helper singleton: an exclusive flock on ``state/helper.lock``, stamped."""
+    """The helper singleton: an exclusive flock on ``state/helper.lock``, stamped.
+
+    ``acquire`` raises ``HelperLockBusy`` only when the lock stays held for a short bound: a
+    client reading whether the lock is held (``helper_lock_held``, ``helper_holder``) takes a
+    shared flock for a moment, and that probe is never read as another helper.
+    """
 
     __slots__ = ("_descriptor", "_path")
 
@@ -644,12 +654,19 @@ class HelperLock:
                 or stat.S_IMODE(facts.st_mode) & 0o077
             ):
                 raise HelperLockBusy
-            try:
-                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except OSError as exc:
-                if exc.errno in {errno.EWOULDBLOCK, errno.EAGAIN}:
-                    raise HelperLockBusy from None
-                raise
+            deadline = time.monotonic() + _LOCK_ACQUIRE_SECONDS
+            while True:
+                try:
+                    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except OSError as exc:
+                    if exc.errno not in {errno.EWOULDBLOCK, errno.EAGAIN}:
+                        raise
+                    # A client's probe passes in a moment; a helper still holding it past the
+                    # bound is a live one.
+                    if time.monotonic() >= deadline:
+                        raise HelperLockBusy from None
+                    time.sleep(_LOCK_ACQUIRE_POLL_SECONDS)
             stamp: dict[str, JsonValue] = {
                 "pid": os.getpid(),
                 "version": version,

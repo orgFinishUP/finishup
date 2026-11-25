@@ -20,6 +20,7 @@ from finishup.adapters.privacy.update_checks import (
     HttpxUpdateChecksTransport,
     UpdateChecksTransport,
     UpdateChecksTransportError,
+    is_release_version,
 )
 from finishup.config.paths import PathSafetyError, ensure_owner_only_dir, state_dir
 from finishup.domain.privacy import EgressChannel, PrivacyPolicy
@@ -291,7 +292,10 @@ def load_package_update_cache(
     version_raw = document.get("latest_version")
     fetched_raw = document.get("fetched_at")
     ttl_raw = document.get("ttl_seconds")
-    if type(version_raw) is not str or not version_raw or type(fetched_raw) is not str:
+    # An entry written by an older release may hold registry text that is not a version.
+    if type(version_raw) is not str or not is_release_version(version_raw):
+        return None
+    if type(fetched_raw) is not str:
         return None
     if type(ttl_raw) is not int or ttl_raw <= 0 or ttl_raw > 7 * 24 * 3600:
         return None
@@ -327,7 +331,7 @@ def store_package_update_cache(
     ``package`` defaults to this installation's identity (``installed_package_name``).
     """
 
-    if type(latest_version) is not str or not latest_version:
+    if type(latest_version) is not str or not is_release_version(latest_version):
         raise ValueError("latest_version_invalid")
     polled = installed_package_name() if package is None else package
     if polled not in _CACHE_NAMES:
@@ -425,6 +429,9 @@ async def resolve_package_update_advisory(
     client = transport if transport is not None else HttpxUpdateChecksTransport(package=polled)
     try:
         latest = await client.fetch_latest_version()
+        # Any transport, not only the production one, must answer with a release version.
+        if not is_release_version(latest):
+            raise UpdateChecksTransportError("version_invalid")
     except UpdateChecksTransportError:
         if cached is not None:
             return build_package_update_advisory(

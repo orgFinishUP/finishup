@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import shlex
+
 import pytest
 
 from finishup.domain.observation_selection import (
     OBSERVATION_CLASSIFICATION_VERSION,
     ObservationContentRole,
     classify_observation,
+    command_is_verification,
     command_runner_class,
+    compound_verification_gap_required,
     is_routine_read_candidate,
 )
 from finishup.protocol.canonical import JsonValue
@@ -212,6 +216,91 @@ def test_python_module_runs_and_build_named_scripts(command: str, runner: str) -
     """tb4n2 interleaved S (P1-2): `python -m pytest` is a test run; `build_model.py` is not a build."""
 
     assert command_runner_class({"command": command}) == runner
+
+
+@pytest.mark.parametrize(
+    "command", ["bash -nc 'pytest -q'", "bash -cn 'pytest -q'", "sh -lnc 'pytest -q'"]
+)
+def test_a_noexec_shell_wrapper_is_not_classed_as_the_command_it_only_reads(command: str) -> None:
+    """``bash -nc X`` reads ``X`` without running it, so it is no test run (#1444)."""
+
+    from finishup.domain.observation_selection import native_command_runner_class
+
+    assert command_runner_class({"command": command}) == "other"
+    argv: list[JsonValue] = list(command.replace("'", "").split(" ", 2))
+    assert native_command_runner_class(argv) == "other"
+    assert command_runner_class({"command": "bash -lc 'pytest -q'"}) == "test"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # The script-file form and a ``-c`` text that names a test script.
+        "bash -n run_tests.sh",
+        "bash -nc ./run_tests.sh",
+        "sh -cn verify.sh",
+        "zsh -n tests/check.zsh",
+        "/bin/bash -n run_tests.sh",
+        # ``n`` anywhere among the shell's own options, which bash keeps reading after ``-c``.
+        "bash -xn tests/run.sh",
+        "bash --norc -n run_tests.sh",
+        "bash -c -n ./run_tests.sh",
+        # The option by name.
+        "bash -o noexec tests/run.sh",
+        "bash -eo noexec ./run_tests.sh",
+        "bash -O extglob -o noexec run_tests.sh",
+        "zsh -o NO_EXEC run_tests.sh",
+        "zsh --no-exec run_tests.sh",
+        # Text or a file name that reads as another verifier.
+        "bash -nc 'mypy src'",
+        "bash -nc 'npm run build'",
+        "bash -n build.sh",
+        "sh -n lint.sh",
+        "bash -o noexec build.sh",
+        # Behind a wrapper, a launcher or another shell.
+        "timeout 60 bash -n run_tests.sh",
+        "env CI=1 sh -n verify.sh",
+        "uv run bash -n run_tests.sh",
+        "sh -c 'bash -n run_tests.sh'",
+    ],
+)
+def test_a_noexec_shell_is_no_verification_run_in_any_form(command: str) -> None:
+    """A shell given noexec reads its script and runs nothing, whatever the script is (#1444)."""
+
+    from finishup.domain.observation_selection import native_command_runner_class
+
+    hook_payload: dict[str, JsonValue] = {"tool_name": "Bash", "tool_input": {"command": command}}
+    assert command_runner_class(hook_payload) == "other"
+    assert command_is_verification(command) is False
+    argv: list[JsonValue] = list(shlex.split(command))
+    assert native_command_runner_class(argv) == "other"
+    # The host's own shell around the call, as a Codex native argv carries it.
+    assert native_command_runner_class(["/bin/bash", "-lc", command]) == "other"
+    # In a composition it adds no verification, and a real one beside it still counts.
+    assert command_runner_class({"command": f"cd /app && {command}"}) == "compound"
+    assert command_runner_class({"command": f"{command} && pytest -q"}) == "test"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "bash run_tests.sh",
+        "bash -x run_tests.sh",
+        "bash -eu run_tests.sh",
+        "bash --norc run_tests.sh",
+        "zsh tests/check.zsh",
+        # After the script or the ``-c`` text a word is the script's own argument.
+        "bash run_tests.sh -n",
+        "bash -c 'pytest -q' -n",
+        "sh -c 'pytest -q -n 4'",
+    ],
+)
+def test_a_shell_that_runs_its_script_keeps_the_class_of_what_it_runs(command: str) -> None:
+    from finishup.domain.observation_selection import native_command_runner_class
+
+    assert command_runner_class({"command": command}) == "test"
+    argv: list[JsonValue] = list(shlex.split(command))
+    assert native_command_runner_class(argv) == "test"
 
 
 def test_a_codex_post_event_is_not_a_success_fact() -> None:
@@ -432,3 +521,142 @@ def test_only_a_path_ending_in_the_launcher_name_gates_the_proof(
     from finishup.domain.observation_selection import launcher_names_in
 
     assert launcher_names_in(command) == names
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "pytest -q 2>&1",
+        "cd /app && pytest -q 2>&1",
+        "pytest -q &> log",
+        "pytest -q &>> log",
+        "pytest -q >&2",
+        "pytest -q > log",
+        "git commit -m 'a; b'",
+        'echo "x | y" && pytest -q',
+        "bash -lc 'pytest -q 2>&1'",
+        "cd /app && pytest -q",
+    ],
+)
+def test_redirections_and_quoted_separators_hide_no_nested_status(command: str) -> None:
+    """An fd redirection or a quoted separator leaves one exit status, so no gap (#1447)."""
+
+    assert compound_verification_gap_required({"command": command}) is False
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "a; b",
+        "a | tail",
+        "a 2>&1 | tail -5",
+        "a |& tail",
+        "a || b",
+        "a & b",
+        "a && b &",
+        "a\nb",
+        "echo $(a)",
+        "echo `a`",
+        "diff <(a) b",
+        "bash -lc 'pytest -q; true'",
+        "echo 'unterminated && b",
+    ],
+)
+def test_masking_shapes_keep_the_compound_gap(command: str) -> None:
+    assert compound_verification_gap_required({"command": command}) is True
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "eval 'pytest -q; true'",
+        "bash -c 'pytest -q; true' arg0",
+        "bash -l -c 'pytest -q || true'",
+        "sudo bash -c 'pytest -q; true'",
+        "timeout 60 sh -c 'pytest -q | tail'",
+        "xargs sh -c 'pytest -q; true'",
+        'bash -c "bash -c \'bash -c \\"bash -c \\\\\\"pytest -q; true\\\\\\"\\"\'"',
+    ],
+)
+def test_a_quoted_separator_that_a_shell_runs_keeps_the_compound_gap(command: str) -> None:
+    """Quoted text a shell or ``eval`` runs is shell text, even where the walk does not reach it."""
+
+    assert compound_verification_gap_required({"command": command}) is True
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # A shell the closed runner list cannot name, and an unexpanded one.
+        "fish -c 'pytest -q; true'",
+        "ash -c 'pytest -q; true'",
+        "$SHELL -c 'pytest -q; true'",
+        "\"$SHELL\" -lc 'pytest -q; true'",
+        "cd /app && fish -c 'pytest -q | tail'",
+        # Programs that run one of their arguments as shell text or as a command.
+        "script -qec 'pytest -q; true' /dev/null",
+        "nix-shell --run 'pytest -q; true'",
+        "flock /tmp/lock -c 'pytest -q; true'",
+        "npx -c 'pytest -q; true'",
+        "git rebase -x 'pytest -q || true' main",
+        "tmux send-keys 'pytest -q; true' Enter",
+        "find tests -name 'test_*.py' -exec pytest {} \\;",
+        "awk 'BEGIN { system(\"pytest -q; true\") }'",
+        "python -c 'import os; os.system(\"pytest -q; true\")'",
+        # A program nothing is known about, and a known one that is not run as itself.
+        "docker exec app pytest -k 'a|b'",
+        "./grep 'a|b' notes.txt",
+        "PATH=. grep 'a|b' notes.txt",
+        "rg --pre './run; true' needle",
+    ],
+)
+def test_a_quoted_separator_keeps_the_gap_unless_its_program_only_reads_it(command: str) -> None:
+    """Any program not known to read its arguments as data may run the quoted text as shell text.
+
+    The gap main reported for these was lost when only a closed list of shells brought it back.
+    """
+
+    assert compound_verification_gap_required({"command": command}) is True
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # bash reads ``${x:- #}`` as an expansion; the splitter reads a comment and drops the rest.
+        "echo ${x:- #} ; pytest -q; true",
+        # After a line continuation bash starts a comment at ``#``, so its quote is no quote.
+        "echo x \\\n#'\npytest -q; true #'",
+        # ANSI-C quoting escapes the quote that seems to close the string.
+        "echo $'it\\'s' ; pytest -q; true #'",
+        # A comment the splitter drops is text it did not account for.
+        "pytest -q # then: lint; build",
+    ],
+)
+def test_text_the_splitter_can_misread_keeps_the_gap(command: str) -> None:
+    """A quiet answer needs every separator character accounted for inside a data program's call."""
+
+    assert compound_verification_gap_required({"command": command}) is True
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git commit -m 'a; b'",
+        "git -C /repo commit -m 'a | b'",
+        "git commit -m 'first line\n\nsecond; third'",
+        "grep -E 'a|b' notes.txt",
+        "cd /app && grep -rn 'foo\\|bar' src",
+        "jq '.items | length' data.json",
+        "curl -s 'https://example.test/?a=1&b=2'",
+        "printf '%s\\n' 'a; b'",
+        "echo 'a; b' > notes.txt",
+        "echo 'a; b' # a note",
+        "sed 's/a|b/c/' notes.txt",
+        # A line continuation joins two lines of one command.
+        "pytest -q \\\n  tests/unit",
+    ],
+)
+def test_a_separator_that_is_data_to_a_known_program_raises_no_gap(command: str) -> None:
+    """The relaxation #1447 made stays for the programs known to only read their arguments."""
+
+    assert compound_verification_gap_required({"command": command}) is False

@@ -11,9 +11,9 @@ import struct
 from collections.abc import Awaitable, Buffer, Callable, Mapping
 from dataclasses import dataclass, field, fields, is_dataclass
 from enum import Enum
-from typing import Final, Literal, Never, Protocol, cast
-
-from pydantic import BaseModel
+from functools import cache
+from types import MappingProxyType
+from typing import TYPE_CHECKING, Final, Literal, Never, Protocol, cast
 
 from finishup.adapters.control.unix_socket import LocalControlTransportError
 from finishup.adapters.repository_identity import RepositoryIdentityError
@@ -43,20 +43,7 @@ from finishup.ports.control import (
 from finishup.ports.workspace_agent import workspace_handle_valid
 from finishup.protocol.canonical import JsonValue, canonical_encode, strict_json_parse
 from finishup.protocol.errors import ProtocolValueError, PublicErrorCode, SafeDetailValue
-from finishup.protocol.models import (
-    CheckRequest,
-    CheckResult,
-    PublishWorkRequest,
-    PublishWorkResult,
-    ReceiptRequest,
-    ReceiptResult,
-    RespondRequest,
-    RespondResult,
-    StartRequest,
-    StartResult,
-    StatusRequest,
-    StatusResult,
-)
+from finishup.protocol.lazy_module import is_pydantic_model
 from finishup.protocol.schemas import (
     prepare_schemas,
     schema_document_for,
@@ -68,6 +55,32 @@ from finishup.protocol.server_profile import (
     ServerProfileRevision,
     revision_from_json,
     revision_to_json,
+)
+
+if TYPE_CHECKING:
+    import finishup.protocol.models as _protocol_models
+else:
+    from finishup.protocol.lazy_module import LazyModule
+
+    # The workflow models load on the first workflow call or result, so a process that only asks
+    # for service status never imports pydantic; the aliases below still resolve to the real models.
+    _protocol_models = LazyModule("finishup.protocol.models")
+
+type _WorkflowRequestModel = (
+    _protocol_models.StartRequest
+    | _protocol_models.PublishWorkRequest
+    | _protocol_models.CheckRequest
+    | _protocol_models.RespondRequest
+    | _protocol_models.StatusRequest
+    | _protocol_models.ReceiptRequest
+)
+type _WorkflowResultModel = (
+    _protocol_models.StartResult
+    | _protocol_models.PublishWorkResult
+    | _protocol_models.CheckResult
+    | _protocol_models.RespondResult
+    | _protocol_models.StatusResult
+    | _protocol_models.ReceiptResult
 )
 
 __all__ = [
@@ -180,22 +193,69 @@ _WORKFLOW_METHODS: Final = tuple(
     )
 )
 _ALL_METHODS: Final = tuple(sorted(ControlMethod, key=lambda value: value.value.encode("ascii")))
-_WORKFLOW_REQUEST_MODELS: Final[Mapping[ControlMethod, type[BaseModel]]] = {
-    ControlMethod.START: StartRequest,
-    ControlMethod.PUBLISH_WORK: PublishWorkRequest,
-    ControlMethod.CHECK: CheckRequest,
-    ControlMethod.RESPOND: RespondRequest,
-    ControlMethod.STATUS: StatusRequest,
-    ControlMethod.RECEIPT: ReceiptRequest,
-}
-_WORKFLOW_RESULT_MODELS: Final[Mapping[ControlMethod, type[BaseModel]]] = {
-    ControlMethod.START: StartResult,
-    ControlMethod.PUBLISH_WORK: PublishWorkResult,
-    ControlMethod.CHECK: CheckResult,
-    ControlMethod.RESPOND: RespondResult,
-    ControlMethod.STATUS: StatusResult,
-    ControlMethod.RECEIPT: ReceiptResult,
-}
+
+
+@cache
+def _workflow_request_models() -> Mapping[ControlMethod, type[_WorkflowRequestModel]]:
+    """The protocol request model per workflow method, imported on the first workflow call."""
+
+    from finishup.protocol.models import (
+        CheckRequest,
+        PublishWorkRequest,
+        ReceiptRequest,
+        RespondRequest,
+        StartRequest,
+        StatusRequest,
+    )
+
+    return MappingProxyType(
+        {
+            ControlMethod.START: StartRequest,
+            ControlMethod.PUBLISH_WORK: PublishWorkRequest,
+            ControlMethod.CHECK: CheckRequest,
+            ControlMethod.RESPOND: RespondRequest,
+            ControlMethod.STATUS: StatusRequest,
+            ControlMethod.RECEIPT: ReceiptRequest,
+        }
+    )
+
+
+@cache
+def _workflow_result_models() -> Mapping[ControlMethod, type[_WorkflowResultModel]]:
+    """The protocol result model per workflow method, imported on the first workflow result."""
+
+    from finishup.protocol.models import (
+        CheckResult,
+        PublishWorkResult,
+        ReceiptResult,
+        RespondResult,
+        StartResult,
+        StatusResult,
+    )
+
+    return MappingProxyType(
+        {
+            ControlMethod.START: StartResult,
+            ControlMethod.PUBLISH_WORK: PublishWorkResult,
+            ControlMethod.CHECK: CheckResult,
+            ControlMethod.RESPOND: RespondResult,
+            ControlMethod.STATUS: StatusResult,
+            ControlMethod.RECEIPT: ReceiptResult,
+        }
+    )
+
+
+def _workflow_request_model(method: ControlMethod) -> type[_WorkflowRequestModel] | None:
+    """Return a workflow method's request model, or ``None`` for a JSON-object body."""
+
+    return _workflow_request_models()[method] if method in _WORKFLOW_METHODS else None
+
+
+def _workflow_result_model(method: ControlMethod) -> type[_WorkflowResultModel] | None:
+    """Return a workflow method's result model, or ``None`` for a JSON-object body."""
+
+    return _workflow_result_models()[method] if method in _WORKFLOW_METHODS else None
+
 
 type ControlFrame = JsonObject
 type SchemaDirection = Literal["request", "result"]
@@ -508,7 +568,7 @@ def _plain_wire_value(value: object) -> JsonValue:
                 for key in sorted(value.accepted_state)
             }
         return body
-    if isinstance(value, BaseModel):
+    if is_pydantic_model(value):
         # Match public_model_to_wire: keep explicit nulls required by closed schemas,
         # omit unset optional fields (optional_non_null must stay absent, not null).
         return cast(
@@ -854,7 +914,7 @@ def parse_control_request(frame: ControlFrame) -> ControlRequest:
             )
         method = ControlMethod(cast(str, wire["method"]))
         raw_body = wire["body"]
-        model = _WORKFLOW_REQUEST_MODELS.get(method)
+        model = _workflow_request_model(method)
         body = (
             JsonObject(cast(Mapping[str, JsonValue], raw_body))
             if model is None
@@ -922,7 +982,7 @@ def parse_control_result(frame: ControlFrame) -> ControlResult:
                 accepted=cast(Literal[True], raw_body["accepted"]),
             )
         else:
-            model = _WORKFLOW_RESULT_MODELS.get(method)
+            model = _workflow_result_model(method)
             body = (
                 JsonObject(cast(Mapping[str, JsonValue], raw_body))
                 if model is None
@@ -1041,6 +1101,19 @@ def parse_workspace_reply(frame: ControlFrame) -> WorkspaceReply:
         )
     except (KeyError, TypeError, ValueError):
         raise ControlProtocolError("frame_invalid") from None
+
+
+def _workspace_locator_from_wire(value: object) -> WorkspaceLocator:
+    if not isinstance(value, Mapping):
+        _fail("protocol_mismatch")
+    source = cast(Mapping[str, object], value)
+    try:
+        return WorkspaceLocator(
+            path=cast(str, source["path"]),
+            schema_version=cast(Literal["1.0.0"], source["schema_version"]),
+        )
+    except (KeyError, TypeError, ValueError):
+        raise ControlProtocolError("protocol_mismatch") from None
 
 
 def _workspace_claim_from_wire(value: object) -> WorkspaceClaim:
@@ -1448,21 +1521,18 @@ async def server_handshake(
                         _fail("protocol_mismatch")
                     # One handle per claimed worktree: the commitment is the repository's.
                     workspace_handle = repository_context.workspace_handle
-        if raw_locator is not None and repository_context_resolver is not None:
-            if not isinstance(raw_locator, Mapping):
-                _fail("protocol_mismatch")
-            locator_wire = cast(Mapping[str, JsonValue], raw_locator)
-            repository_context = await repository_context_resolver(
-                WorkspaceLocator(
-                    path=cast(str, locator_wire["path"]),
-                    schema_version=cast(Literal["1.0.0"], locator_wire["schema_version"]),
-                )
-            )
-            if repository_context is not None and (
-                type(repository_context) is not RepositoryPrivacyContext
-                or repository_context.identity_kind == "client_claim"
-            ):
-                _fail("protocol_mismatch")
+        if raw_locator is not None:
+            # The peer's locator is checked whether or not anything resolves it: a path the
+            # schema admits (in characters) but the locator refuses (in UTF-8 bytes) is the
+            # peer's malformed value, never a fault on the service's side.
+            locator = _workspace_locator_from_wire(raw_locator)
+            if repository_context_resolver is not None:
+                repository_context = await repository_context_resolver(locator)
+                if repository_context is not None and (
+                    type(repository_context) is not RepositoryPrivacyContext
+                    or repository_context.identity_kind == "client_claim"
+                ):
+                    _fail("protocol_mismatch")
         allowed = _allowed_for(kind)
         await write_control_frame(
             stream,

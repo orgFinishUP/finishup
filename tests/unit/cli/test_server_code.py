@@ -212,6 +212,32 @@ def test_the_level_options_are_shown_and_refused_for_a_server_on_this_computer(h
     assert "--level and --retention apply to a server elsewhere" in refused.output
 
 
+@pytest.mark.parametrize(
+    "options", [("--level", "L2"), ("--retention", "task_close")], ids=["level", "retention"]
+)
+@pytest.mark.parametrize("name", ["local", "bench"])
+def test_use_of_a_server_on_this_computer_refuses_the_level_options_and_changes_nothing(
+    remote: targets.ServerTarget,
+    name: str,
+    options: tuple[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``use local`` refuses ``--level``/``--retention`` as a named server on this computer does:
+    the selection and the connection to the server elsewhere stay as they were."""
+
+    with targets.registry_lock():
+        targets.new_local_target("bench")
+
+    def never(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("the connection to the server elsewhere is not closed")
+
+    monkeypatch.setattr(server_cli, "runtime_for", never)
+    refused = _RUNNER.invoke(app, ["server", "use", name, *options])
+    assert refused.exit_code == 2, refused.output
+    assert "--level and --retention apply to a server elsewhere" in refused.output
+    assert targets.read_selected_target_id() == remote.target_id
+
+
 # --- finishup server code: this computer's own choices ----------------------------------------------
 
 
@@ -393,6 +419,120 @@ def test_allow_remove_sends_less_with_no_question_and_is_idempotent(
     outside = _RUNNER.invoke(app, ["server", "code", "allow", "remove", "../aws.ini"])
     assert outside.exit_code != 0 and "PATH must be inside the repository" in outside.output
     assert [path for path, _digest in _allowed(remote)] == ["other.ini"]
+
+
+# --- a full or unusable record of the choices ---------------------------------------------------
+
+
+def _fill(
+    record: targets.ServerTarget,
+    worktree: Path,
+    *,
+    exclude: int = 0,
+    allow: int = 0,
+) -> bytes:
+    """Record ``exclude`` patterns and ``allow`` entries for ``worktree``; the record's bytes."""
+
+    from dataclasses import replace
+
+    from finishup.client.code_copy_settings import settings_path, update_settings
+
+    key = server_cli.repository_here(str(worktree)).key
+    patterns = tuple(sorted(f"p{index:04d}/" for index in range(exclude)))
+    allowed = tuple(sorted((f"f{index:04d}.ini", "sha256:" + "0" * 64) for index in range(allow)))
+    root = targets.target_root(record.target_id)
+    with targets.registry_lock():
+        update_settings(
+            root,
+            record.target_id,
+            key,
+            lambda settings: replace(settings, exclude=patterns, allow=allowed),
+        )
+    return settings_path(root).read_bytes()
+
+
+def test_a_full_list_is_refused_as_full_on_this_computer_and_nothing_is_changed(
+    remote: targets.ServerTarget, repository: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from finishup.client.code_copy_settings import settings_path
+
+    before = _fill(remote, repository, exclude=256, allow=256)
+    path = settings_path(targets.target_root(remote.target_id))
+    server = _server(monkeypatch, _Server())
+    console = _Console(b"lab")
+    _console(monkeypatch, console)
+    (repository / "aws.ini").write_bytes(b"key\n")
+    for arguments in (("exclude", "add", "one-more/"), ("allow", "add", "aws.ini")):
+        result = _RUNNER.invoke(app, ["server", "code", *arguments])
+        assert result.exit_code == 2, result.output
+        assert result.stderr.startswith("code_copy_settings_limit:"), result.output
+        assert "remove one first" in result.stderr
+        assert server_cli._DEFAULT_REMEDY not in result.output  # pyright: ignore[reportPrivateUsage]
+    # Nothing was asked, of the owner or of a server, and the record is as it was.
+    assert console.opened == 0 and server.asked == []
+    assert path.read_bytes() == before
+    # A pattern already on the full list is still recorded (nothing changes).
+    again = _RUNNER.invoke(app, ["server", "code", "exclude", "add", "p0000/"])
+    assert again.exit_code == 0, again.output
+    assert path.read_bytes() == before
+
+
+def test_a_repository_past_the_most_this_computer_keeps_is_refused_as_full(
+    remote: targets.ServerTarget, repository: Path
+) -> None:
+    from dataclasses import replace
+
+    from finishup.client.code_copy_settings import settings_path, update_settings
+
+    root = targets.target_root(remote.target_id)
+    with targets.registry_lock():
+        for index in range(256):
+            update_settings(
+                root,
+                remote.target_id,
+                "sha256:" + f"{index:064x}",
+                lambda settings: replace(settings, level="L1"),
+            )
+    before = settings_path(root).read_bytes()
+    del repository
+    result = _RUNNER.invoke(app, ["server", "code", "exclude", "add", "data/"])
+    assert result.exit_code == 2, result.output
+    assert result.stderr.startswith("code_copy_settings_limit:"), result.output
+    assert settings_path(root).read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    ("damage", "reason"),
+    [("malformed", "code_copy_settings_invalid"), ("shared", "code_copy_settings_unsafe")],
+)
+@pytest.mark.parametrize(
+    "arguments",
+    [("exclude", "list"), ("exclude", "add", "data/"), ("allow", "list"), ("level", "L1")],
+    ids=" ".join,
+)
+def test_an_unusable_record_of_the_choices_names_its_repair_never_a_server_fault(
+    remote: targets.ServerTarget,
+    repository: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    damage: str,
+    reason: str,
+    arguments: tuple[str, ...],
+) -> None:
+    from finishup.client.code_copy_settings import settings_path
+
+    del repository
+    path = settings_path(targets.target_root(remote.target_id))
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    path.write_bytes(b"{not json}\n")
+    os.chmod(path, 0o644 if damage == "shared" else 0o600)
+    server = _server(monkeypatch, _Server())
+    result = _RUNNER.invoke(app, ["server", "code", *arguments])
+    assert result.exit_code == 20, result.output
+    assert result.stderr.startswith(f"{reason}:"), result.output
+    assert server_cli._DEFAULT_REMEDY not in result.output  # pyright: ignore[reportPrivateUsage]
+    assert "code-copy.json" in result.stderr and "no copy" in result.stderr
+    assert server.asked == []
+    assert path.read_bytes() == b"{not json}\n"
 
 
 # --- forget --all ---------------------------------------------------------------------------------
@@ -1519,3 +1659,96 @@ def test_forget_all_and_list_all_ask_nothing_for_a_held_record_naming_nothing_se
         assert text.exit_code == 0, text.output
         assert "never sent; this computer's record of it names nothing sent there" in text.stdout
     assert _Connection.made == [] and connection == [] and folder.exists()
+
+
+def _never_sent_from(record: targets.ServerTarget, worktree: Path) -> Path:
+    """A held repository whose export record for ``record`` names nothing sent there."""
+
+    from finishup.cli.server import repository_here
+    from finishup.client.code_export import ExportDatabase
+    from finishup.client.code_sync import export_folder
+
+    folder = export_folder(record.target_id, repository_here(str(worktree)).key)
+    ExportDatabase(folder).remember_root(Path(os.path.realpath(worktree)))
+    _hold(record, worktree)
+    return folder
+
+
+def test_forget_all_of_only_never_sent_records_says_nothing_was_asked_or_deleted(
+    remote: targets.ServerTarget,
+    repository: Path,
+    connection: list[tuple[Path | None, str]],
+) -> None:
+    """Nothing was sent, so nothing is said to be forgotten there and no task is said to lose
+    what it captured from a copy, matching the JSON's ``forgotten: 0``."""
+
+    _never_sent_from(remote, repository)
+    machine = _RUNNER.invoke(app, ["server", "code", "forget", "--all", "--json"])
+    assert machine.exit_code == 0, machine.output
+    assert json.loads(machine.stdout)["forgotten"] == 0
+    text = _RUNNER.invoke(app, ["server", "code", "forget", "--all"])
+    assert text.exit_code == 0, text.output
+    lines = text.stdout.splitlines()
+    assert lines[-1] == (
+        "This computer sent lab nothing from these repositories, so FinishUP asked lab nothing; "
+        "nothing was deleted."
+    )
+    assert "is forgotten there" not in text.stdout
+    assert server_code.FORGET_TRAILER not in text.stdout
+    assert _Connection.made == [] and connection == []
+
+
+def test_forget_all_keeps_the_trailer_for_a_forgotten_copy_beside_a_never_sent_one(
+    remote: targets.ServerTarget,
+    repository: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sent = _second_repository(tmp_path)
+    _sent_from(remote, sent)
+    _never_sent_from(remote, repository)
+    server = _server(monkeypatch, _Server())
+    result = _RUNNER.invoke(app, ["server", "code", "forget", "--all"])
+    assert result.exit_code == 0, result.output
+    assert [asked[0] for asked in server.asked] == [os.path.realpath(sent)]
+    lines = result.stdout.splitlines()
+    assert lines[-2:] == [
+        "Every copy this computer sent to lab is forgotten there.",
+        server_code.FORGET_TRAILER,
+    ]
+
+
+def test_forget_all_says_no_trailer_when_its_one_sent_copy_was_not_forgotten(
+    remote: targets.ServerTarget,
+    repository: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sent = _second_repository(tmp_path)
+    _sent_from(remote, sent)
+    _never_sent_from(remote, repository)
+    _server(monkeypatch, _Server(refuse={os.path.realpath(sent): "remote_unreachable"}))
+    result = _RUNNER.invoke(app, ["server", "code", "forget", "--all"])
+    assert result.exit_code == 20, result.output
+    assert "1 of 2 not forgotten: each stays on lab until it expires or is forgotten." in (
+        result.stdout.splitlines()
+    )
+    assert server_code.FORGET_TRAILER not in result.stdout
+
+
+def test_remove_forget_copies_of_only_never_sent_records_says_nothing_was_asked_or_deleted(
+    far: targets.ServerTarget, repository: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _never_sent_from(far, repository)
+    server = _server(monkeypatch, _Server())
+    console = _NoConsole()
+    _console(monkeypatch, console)
+    result = _RUNNER.invoke(app, ["server", "remove", "far", "--forget-copies"])
+    assert result.exit_code == 0, result.output
+    assert (
+        "This computer sent far nothing from these repositories, so FinishUP asked far nothing; "
+        "nothing was deleted."
+    ) in result.stdout.splitlines()
+    assert "is forgotten there" not in result.stdout
+    assert server_code.FORGET_TRAILER not in result.stdout
+    assert server.asked == [] and console.opened == 0 and "far" not in _names()

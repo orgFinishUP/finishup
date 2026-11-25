@@ -115,6 +115,37 @@ def test_unbalanced_quotes_do_not_raise(env: dict[str, Path]) -> None:
     assert _target("pip install 'x", env) is None
 
 
+def test_an_install_on_a_later_line_is_classified(env: dict[str, Path]) -> None:
+    # A newline ends a command exactly as ``;`` does (#1434).
+    assert _target("cd /w\nuv pip install requests", env) == "unresolved"
+    assert _target("echo start\npipx install ruff", env) == "private_env"
+    assert _target(f"cd {env['workspace']}\n{env['private']}/bin/pip install x", env) == (
+        "private_env"
+    )
+    assert _target("echo one\n\n  pip install x\n", env) == "system"
+    assert _target("make 2>&1 |& tee log\npipx install ruff", env) == "private_env"
+    assert _target("make |& pipx install ruff", env) == "private_env"
+
+
+def test_a_newline_that_is_not_a_command_separator_splits_nothing(env: dict[str, Path]) -> None:
+    # Inside quotes, after a backslash, in a comment or in a heredoc body a newline (or a line
+    # that reads as an install) is data.
+    assert _target("echo 'first\npip install x'", env) is None
+    assert _target('git commit -m "notes\npipx install ruff"', env) is None
+    assert _target("pip \\\n  install x", env) == "system"
+    assert _target("# pip install x\nls", env) is None
+    assert _target("cat <<'EOF' > notes.md\npipx install ruff\nEOF\nls", env) is None
+    assert _target("cat <<EOF\npipx install ruff\nEOF\npip install x", env) == "system"
+
+
+def test_an_install_inside_a_command_substitution_is_classified(env: dict[str, Path]) -> None:
+    assert _target("echo $(pip install x)", env) == "system"
+    assert _target('log="$(pipx install ruff)"', env) == "private_env"
+    assert _target("echo $(echo $(pip install x))", env) == "system"
+    assert _target("echo '$(pip install x)'", env) is None
+    assert _target("echo $(pip list)", env) is None
+
+
 # --- task interpreter (tb4n1 regressions) ------------------------------------------------------
 
 
@@ -304,6 +335,60 @@ def test_git_apply_and_patch_heredocs_are_workspace_writes(tmp_path: Path) -> No
     assert scope("git apply <<'EOF'\n--- a/src/x.py\n+++ b/src/x.py\n@@\n-a\n+b\n") is None
 
 
+def test_a_code_section_after_a_padded_delimiter_line_is_a_workspace_write(
+    tmp_path: Path,
+) -> None:
+    """A README context line `` EOF`` does not end the heredoc, so the patch's later code section
+    keeps the command an ordinary edit rather than a stale-exempt documentation one."""
+
+    command = (
+        "git apply <<'EOF'\n--- a/README.md\n+++ b/README.md\n@@ -1,3 +1,3 @@\n cat <<EOF\n"
+        "-old\n+new\n EOF\n--- a/src/main.py\n+++ b/src/main.py\n@@ -1 +1 @@\n-x = 1\n+x = 2\n"
+        "EOF\n"
+    )
+    assert _facts("Bash", {"command": command}, tmp_path).get("write_scope") == "workspace"
+
+
+@pytest.mark.parametrize("opener", ["git apply <<\\EOF", "git apply <<'END-PATCH'"])
+def test_a_heredoc_patch_with_any_bash_delimiter_is_a_workspace_write(
+    opener: str, tmp_path: Path
+) -> None:
+    delimiter = "END-PATCH" if "END-" in opener else "EOF"
+    command = (
+        f"{opener}\n--- a/src/main.py\n+++ b/src/main.py\n@@ -1 +1 @@\n-x = 1\n+x = 2\n"
+        f"{delimiter}\n"
+    )
+    assert _facts("Bash", {"command": command}, tmp_path).get("write_scope") == "workspace"
+
+
+@pytest.mark.parametrize("closing", ["EOF \n", "EOF\t\n", "  EOF\n", "EOF \npytest -q\n"])
+@pytest.mark.parametrize("opener", ["git apply <<'EOF'", "patch -p1 <<EOF", "apply_patch <<'EOF'"])
+def test_a_patch_heredoc_bash_does_not_close_is_still_a_workspace_write(
+    opener: str, closing: str, tmp_path: Path
+) -> None:
+    """A closing line with a trailing blank, or indented without ``<<-``, closes nothing, and
+    bash then feeds the patch tool every line to the end of the script: the edit happens, so
+    the hook records it, from a command string and from a native argv alike."""
+
+    patch = (
+        "*** Begin Patch\n*** Update File: src/a.py\n@@\n-a\n+b\n*** End Patch\n"
+        if opener.startswith("apply_patch")
+        else "--- a/src/a.py\n+++ b/src/a.py\n@@ -1 +1 @@\n-a\n+b\n"
+    )
+    command = f"{opener}\n{patch}{closing}"
+    assert _facts("Bash", {"command": command}, tmp_path).get("write_scope") == "workspace"
+    for shell in ("bash", "/bin/bash"):
+        argv: list[JsonValue] = [shell, "-lc", command]
+        assert _facts("shell", {"command": argv}, tmp_path).get("write_scope") == "workspace"
+    # A patch of documentation alone keeps the class its named paths earn.
+    docs = command.replace("src/a.py", "README.md")
+    assert _facts("Bash", {"command": docs}, tmp_path).get("write_scope") == "docs"
+    # A patch tool that only reports writes nothing, however its heredoc ends.
+    if opener.startswith("git apply"):
+        check = command.replace("git apply", "git apply --check")
+        assert _facts("Bash", {"command": check}, tmp_path).get("write_scope") is None
+
+
 def test_shell_redirect_scope(tmp_path: Path) -> None:
     assert (
         _facts("Bash", {"command": "echo x > /opt/elsewhere/y"}, tmp_path)["write_scope"]
@@ -368,6 +453,74 @@ def test_install_target_fact_is_closed_token_only(env: dict[str, Path], tmp_path
     )
     assert facts["install_target"] in runtime_facts.INSTALL_TARGET_VALUES
     assert "secret-pkg" not in repr(facts)
+
+
+@pytest.mark.parametrize("shell", ["bash", "/bin/bash"])
+@pytest.mark.parametrize("tool", ["shell", "local_shell"])
+@pytest.mark.parametrize("workspace_known", [True, False])
+def test_a_native_argv_install_is_read_from_its_script(
+    env: dict[str, Path], shell: str, tool: str, workspace_known: bool
+) -> None:
+    """A Codex ``shell`` hook states ``["bash", "-lc", SCRIPT]``; its install target is the
+    script's, the one its session-stream copy carries (#1435)."""
+
+    script = f"{env['private'] / 'bin' / 'pip'} install x"
+    locator = str(env["workspace"]) if workspace_known else None
+
+    def facts(tool_name: str, command: JsonValue) -> dict[str, JsonValue]:
+        return dict(
+            runtime_structural_facts(
+                {"tool_input": {"command": command}},
+                tool_name=tool_name,
+                workspace_locator=locator,
+                inside=_inside(env["workspace"]),
+            )
+        )
+
+    hook = facts(tool, [shell, "-lc", script])
+    stream = facts("Bash", script)
+    assert stream["install_target"] == "private_env"
+    assert hook["install_target"] == stream["install_target"]
+
+
+@pytest.mark.parametrize("flag", ["-nc", "-cn", "-lnc", "-nlc"])
+@pytest.mark.parametrize("shell", ["bash", "/bin/sh"])
+@pytest.mark.parametrize("tool", ["shell", "local_shell"])
+@pytest.mark.parametrize("workspace_known", [True, False])
+def test_a_noexec_argv_installs_nothing(
+    env: dict[str, Path], flag: str, shell: str, tool: str, workspace_known: bool
+) -> None:
+    """``["bash", "-nc", SCRIPT]`` is a syntax check: the shell reads SCRIPT and runs none of it,
+    so no install happened and the hook reports no install target, as on main. The same argv
+    without ``n`` still reports its script's target (#1435)."""
+
+    script = f"{env['private'] / 'bin' / 'pip'} install x"
+    locator = str(env["workspace"]) if workspace_known else None
+
+    def facts(command: list[JsonValue]) -> dict[str, JsonValue]:
+        return dict(
+            runtime_structural_facts(
+                {"tool_input": {"command": command}},
+                tool_name=tool,
+                workspace_locator=locator,
+                inside=_inside(env["workspace"]),
+            )
+        )
+
+    assert "install_target" not in facts([shell, flag, script])
+    assert "install_target" not in facts([shell, flag, "pipx install x"])
+    assert facts([shell, flag.replace("n", ""), script])["install_target"] == "private_env"
+
+
+def test_a_noexec_argv_is_still_read_for_what_its_script_could_write(tmp_path: Path) -> None:
+    """The write readers ask what a script could do, so they keep reading a noexec argv's script
+    (a write token and a heredoc patch alike); only the install reader asks what ran."""
+
+    patch = "git apply <<'EOF'\n--- a/src/a.py\n+++ b/src/a.py\n@@ -1 +1 @@\n-a\n+b\nEOF\n"
+    for script in ("echo x > src/a.py", patch, f"pipx install x && {patch}"):
+        facts = _facts("shell", {"command": ["bash", "-nc", script]}, tmp_path)
+        assert facts.get("write_scope") == "workspace"
+        assert "install_target" not in facts
 
 
 def test_quoted_text_and_heredoc_bodies_are_not_write_targets(tmp_path: Path) -> None:
@@ -578,6 +731,21 @@ def test_sudo_options_and_attached_target_are_read(env: dict[str, Path], task_ve
     assert _target(f"sudo -H -u builder {telecom}/bin/pip install x", env) == "private_env"
     assert _target("sudo -E pip install x", env) == "system"
     assert _target("pip install -t/opt/deps x", env) == "private_env"
+
+
+def test_prefix_options_take_an_operand_only_where_their_command_reads_one(
+    env: dict[str, Path], task_venv: Path
+) -> None:
+    """``sudo -S`` and ``time -p`` take no operand, so the installer after them is still read."""
+
+    telecom = _venv(env["system"].parent / "tmp" / "telecom_venv", "pip", "python")
+    pip = f"{telecom}/bin/pip"
+    for prefix in ("sudo -S", "time -p", "exec -c", "sudo -S -u builder", "env -i"):
+        assert _target(f"{prefix} {pip} install x", env) == "private_env", prefix
+    # Options that do take an operand still consume it.
+    for prefix in ("env -S 'A=1'", "env -u NAME", "sudo -p prompt", "time -o out", "exec -a n"):
+        assert _target(f"{prefix} {pip} install x", env) == "private_env", prefix
+    assert _target(f"echo pw | sudo -S {pip} install x", env) == "private_env"
 
 
 def test_a_conda_environment_is_an_environment_of_its_own(

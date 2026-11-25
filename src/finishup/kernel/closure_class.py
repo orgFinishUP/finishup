@@ -76,7 +76,10 @@ from finishup.kernel.task_facts import (
     decision_batches,
     effective_obligations,
 )
-from finishup.protocol.models import SemanticReason, SemanticStatus
+from finishup.protocol.model_values import (
+    SemanticReason,
+    SemanticStatus,
+)
 
 __all__ = [
     "ACKNOWLEDGED_NOT_DONE_BASES",

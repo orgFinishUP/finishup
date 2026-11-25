@@ -1238,18 +1238,23 @@ def _target_visible(
     claims: Mapping[ClaimId, object],
     findings: Mapping[FindingId, object],
 ) -> bool:
+    # Every projection mapping key was produced by the matching ID validator,
+    # so a plain ``str`` equal to a key is already a valid ID of that kind and
+    # needs no second validation. A miss still validates, so a malformed target
+    # raises exactly as before and a well-formed absent one returns False.
+    exact = type(target) is str
     if target.startswith("obl_"):
-        return obligation_id(target) in obligations
+        return (exact and target in obligations) or obligation_id(target) in obligations
     if target.startswith("act_"):
-        return action_id(target) in actions
+        return (exact and target in actions) or action_id(target) in actions
     if target.startswith("res_"):
-        return result_id(target) in results
+        return (exact and target in results) or result_id(target) in results
     if target.startswith("evd_"):
-        return evidence_id(target) in evidence
+        return (exact and target in evidence) or evidence_id(target) in evidence
     if target.startswith("clm_"):
-        return claim_id(target) in claims
+        return (exact and target in claims) or claim_id(target) in claims
     if target.startswith("fnd_"):
-        return finding_id(target) in findings
+        return (exact and target in findings) or finding_id(target) in findings
     raise _corrupt()
 
 

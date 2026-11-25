@@ -2,7 +2,6 @@
    words per screen; the particles tell the story. */
 
 * { box-sizing: border-box; }
-html { scroll-behavior: smooth; }
 html, body {
   margin: 0;
   padding: 0;
@@ -58,9 +57,11 @@ img, svg { max-width: 100%; }
 .copy.foot .display { font-size: clamp(64px, min(10vw, 15vh), 136px); line-height: 0.95; }
 .end-title { display: flex; flex-direction: column; align-items: center; gap: 4px; }
 .dot-lockup { display: block; width: min(640px, 84vw); aspect-ratio: 24 / 5; }
-.story.animated .end-subject { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.story.animated .end-subject,
+.story.stills .end-subject { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 .story:not(.animated) .dot-lockup { display: none; }
-.story:not(.animated) .copy.foot .display { font-size: clamp(40px, 6vw, 80px); }
+.story:not(.animated):not(.stills) .copy.foot .display { font-size: clamp(40px, 6vw, 80px); }
+.story.stills .copy.foot .display { font-size: clamp(56px, 8vw, 108px); line-height: 0.96; }
 
 /* ---------- Buttons ---------- */
 .btn {
@@ -87,8 +88,10 @@ img, svg { max-width: 100%; }
 
 /* ---------- Nav ---------- */
 .nav {
-  position: sticky;
+  position: fixed;
   top: 0;
+  left: 0;
+  right: 0;
   z-index: 20;
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
@@ -124,15 +127,166 @@ img, svg { max-width: 100%; }
   padding: 12px 6px;
 }
 .nav-links a.lnk:hover { color: var(--ink); }
-.motion-toggle {
-  padding: 8px;
+
+/* ---------- Scene progress rail ---------- */
+.scene-rail {
+  position: fixed;
+  right: 16px;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 15;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 4px;
+  opacity: 0.55;
+  transition: opacity 160ms ease;
+}
+.scene-rail:hover,
+.scene-rail:focus-within { opacity: 1; }
+.scene-rail[hidden] { display: none; }
+.rail-dot {
+  width: 6px;
+  height: 6px;
+  padding: 0;
+  border-radius: var(--radius-full);
+  background: rgba(6, 78, 59, 0.25);
+  position: relative;
+  transition: height 200ms ease, background 160ms ease;
+}
+.rail-dot::before {
+  content: "";
+  position: absolute;
+  inset: -8px -10px;
+}
+.rail-dot:hover { background: rgba(6, 78, 59, 0.55); }
+.rail-dot.on {
+  height: 20px;
+  background: var(--deep-green);
+}
+
+/* ---------- Side accessibility menu ---------- */
+/* In the page source the trigger comes first and its panel second, which is the order Tab
+   takes. On screen the panel opens above the trigger: the menu is held by its bottom edge and
+   stacks its children upwards. */
+.a11y-menu {
+  position: fixed;
+  right: 0;
+  bottom: 108px;
+  z-index: 25;
+  display: flex;
+  flex-direction: column-reverse;
+  align-items: flex-end;
+  gap: 10px;
+}
+.a11y-menu[hidden] { display: none; }
+.a11y-trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  padding: 0 2px 0 4px;
+  border-radius: var(--radius-full) 0 0 var(--radius-full);
+  background: rgba(250, 253, 249, 0.88);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  border: 1px solid var(--border);
+  border-right: 0;
+  color: var(--ink-muted);
+  box-shadow: 0 2px 10px rgba(17, 32, 27, 0.06);
+  opacity: 0.62;
+  transition: opacity 160ms ease, background 160ms ease, color 160ms ease;
+}
+.a11y-trigger:hover,
+.a11y-trigger:focus-visible,
+.a11y-trigger[aria-expanded="true"] {
+  opacity: 1;
+  background: var(--surface-card);
+  color: var(--deep-green);
+}
+.a11y-trigger svg { width: 18px; height: 18px; }
+.a11y-panel {
+  margin-right: 12px;
+  width: min(276px, calc(100vw - 24px));
+  background: var(--surface-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-card);
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.a11y-panel[hidden] { display: none; }
+.a11y-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.a11y-title {
+  font: 600 13px/1 var(--font-sans);
+  letter-spacing: 0.02em;
+  color: var(--ink);
+}
+.a11y-close {
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--ink-muted);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.a11y-close:hover { background: var(--surface-200); color: var(--ink); }
+.a11y-close svg { width: 15px; height: 15px; }
+.a11y-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.a11y-row[hidden] { display: none; }
+.a11y-label {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.a11y-name { font: 500 14px/1.3 var(--font-sans); color: var(--ink); }
+.a11y-desc { font: 400 12px/1.35 var(--font-sans); color: var(--ink-muted); }
+.a11y-note {
+  margin: 0;
+  padding: 8px 10px;
   border-radius: var(--radius-sm);
   background: var(--surface-200);
-  color: var(--ink-muted);
-  font: 500 13px/1.5 var(--font-sans);
+  color: var(--accent-text);
+  font: 400 12px/1.4 var(--font-sans);
 }
-.motion-toggle:hover { background: var(--highlight); color: var(--ink); }
-.motion-toggle[hidden] { display: none; }
+.a11y-note[hidden] { display: none; }
+.a11y-switch {
+  position: relative;
+  flex: 0 0 auto;
+  width: 40px;
+  height: 24px;
+  padding: 2px;
+  border-radius: var(--radius-full);
+  background: var(--border);
+  transition: background 150ms ease;
+}
+.a11y-switch[hidden] { display: none; }
+.a11y-switch[aria-checked="true"] { background: var(--deep-green); }
+.a11y-knob {
+  display: block;
+  width: 20px;
+  height: 20px;
+  border-radius: var(--radius-full);
+  background: var(--surface-card);
+  box-shadow: 0 1px 2px rgba(17, 32, 27, 0.2);
+  transition: transform 150ms ease;
+}
+.a11y-switch[aria-checked="true"] .a11y-knob { transform: translateX(16px); }
 
 /* ---------- Story: sticky artwork, scenes over it ---------- */
 .story { position: relative; }
@@ -140,11 +294,11 @@ img, svg { max-width: 100%; }
   position: sticky;
   top: 0;
   height: 100vh;
-  height: 100svh;
+  height: 100dvh;
   z-index: 0;
   overflow: hidden;
 }
-.stage canvas {
+.stage > canvas {
   position: absolute;
   inset: 0;
   width: 100%;
@@ -216,8 +370,7 @@ img, svg { max-width: 100%; }
 
 /* ---------- Motion ---------- */
 @media (prefers-reduced-motion: reduce) {
-  html { scroll-behavior: auto; }
-  .btn { transition: none; }
+  .btn, .rail-dot, .scene-rail, .a11y-trigger, .a11y-switch, .a11y-knob { transition: none; }
 }
 
 
@@ -256,8 +409,8 @@ img, svg { max-width: 100%; }
 .stanza .then { display: block; }
 
 /* ---------- Story copy: one fixed layer; the scroll sets each block's opacity ---------- */
-/* the spacer's height is the story's length, set from the plan in index.astro */
-.story .spacer { margin-top: -100vh; margin-top: -100svh; }
+/* the spacer's height is the story's sticky travel length, set from the plan in index.astro */
+.story .spacer { margin-top: 0; }
 .copies { position: absolute; inset: 0; pointer-events: none; }
 .copy {
   position: absolute;
@@ -273,20 +426,74 @@ img, svg { max-width: 100%; }
 .copy.on a, .copy.on button { pointer-events: auto; }
 .hero-word { display: block; }
 /* The artwork draws the hero word and the benchmark figures; their text stays for screen readers */
-.story.animated .hero-word, .story.animated .bench-result { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.story.animated .hero-word,
+.story.stills .hero-word,
+.story.animated .bench-result { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 .bench-result { margin: 0; font: 500 clamp(22px, 2.4vw, 32px)/1.2 var(--font-serif); color: var(--ink-muted); text-wrap: balance; }
 .bench-result strong { font-weight: 600; color: var(--accent-text); }
 .review-note { margin: 0; max-width: 38ch; font: 400 17px/1.5 var(--font-sans); color: var(--ink-muted); }
+.still-art { display: none; }
+.story:not(.animated) { padding-top: 72px; }
 .story:not(.animated) .stage { position: relative; height: auto; overflow: visible; }
-.story:not(.animated) canvas, .story:not(.animated) .spacer { display: none; }
+.story:not(.animated) .stage > canvas, .story:not(.animated) .spacer { display: none; }
 .story:not(.animated) .copies { position: static; pointer-events: auto; }
 .story:not(.animated) .copy { position: relative; min-height: 220px; padding: 48px 24px; opacity: 1; transform: none; justify-content: center; }
-.story:not(.animated) .copy.hero { display: block; padding-top: 72px; }
+.story:not(.animated) .copy.hero { display: block; padding-top: 56px; }
 .story:not(.animated) .hero-top, .story:not(.animated) .hero-bottom { position: static; transform: none; }
 .story:not(.animated) .hero-bottom { margin-top: 32px; }
 .story:not(.animated) .copy-right { margin: 0 auto; align-items: center; text-align: center; }
 /* Without the artwork, both benchmark stops read at once from the figures written out below the line */
 .story:not(.animated) .reveal { display: none; }
+
+/* ---------- Crisp static stills mode (paused / reduced motion) ---------- */
+.story.stills .still-art {
+  position: static;
+  display: block;
+  width: 100%;
+  height: auto;
+  pointer-events: none;
+}
+.story.stills .copy.hero {
+  max-width: 1040px;
+  margin: 0 auto;
+  padding: 56px 24px 72px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+.story.stills .still-hero {
+  width: min(680px, 90vw);
+  aspect-ratio: 16 / 5;
+  margin: 14px auto 10px;
+}
+.story.stills .hero-bottom { margin-top: 12px; }
+.story.stills .copy.side {
+  max-width: 1120px;
+  margin: 0 auto;
+  padding: 44px clamp(20px, 5vw, 64px);
+  display: grid;
+  grid-template-columns: minmax(260px, 1fr) minmax(280px, 1fr);
+  align-items: center;
+  gap: clamp(28px, 5vw, 72px);
+}
+.story.stills .still-scene {
+  width: 100%;
+  max-width: 460px;
+  aspect-ratio: 4 / 3;
+  justify-self: center;
+}
+.story.stills .copy.side .copy-right {
+  margin: 0;
+  align-items: flex-start;
+  text-align: left;
+}
+.story.stills .copy.foot {
+  padding: 56px 24px 72px;
+}
+.story.stills .still-lockup {
+  width: min(560px, 84vw);
+  aspect-ratio: 24 / 5;
+}
 .copy.foot { align-items: center; justify-content: center; padding-top: 88px; padding-bottom: 32px; }
 .copy.hero { position: absolute; }
 .paper { display: inline-flex; align-items: center; gap: 6px; font: 500 15px/1 var(--font-sans); color: var(--accent-text); text-decoration: underline; text-underline-offset: 3px; padding: 8px 0; }
@@ -302,7 +509,7 @@ img, svg { max-width: 100%; }
   /* The copy starts just under the artwork's ground, whose near edge sits at 36% of the
      height (the camera) plus 37% of the width (the ground's depth at the phone scale; see
      SEA_Y and SEA_NEAR in particles.js). */
-  .copy { align-items: flex-start; padding: calc(36vh + 37vw + 20px) 16px 24px; padding-top: calc(36svh + 37vw + 20px); }
+  .copy { align-items: flex-start; padding: calc(36vh + 37vw + 20px) 16px 24px; padding-top: calc(36dvh + 37vw + 20px); }
   .copy-right, .copy-right.wide { margin-left: 0; max-width: none; align-items: flex-start; text-align: left; }
   .stanza { font-size: clamp(26px, 8vw, 34px); text-align: left; }
   .stanza.center { text-align: center; }
@@ -311,7 +518,7 @@ img, svg { max-width: 100%; }
   .hero-top { top: calc(36% - 100px); }
   .copy.hero .stanza { font-size: clamp(30px, 8.6vw, 40px); }
   /* like the story's copy, the hero's second line sits just under the ground */
-  .hero-bottom { top: calc(36vh + 37vw + 12px); top: calc(36svh + 37vw + 12px); bottom: auto; }
+  .hero-bottom { top: calc(36vh + 37vw + 12px); top: calc(36dvh + 37vw + 12px); bottom: auto; }
   .copy.foot { padding-top: 72px; padding-bottom: 32px; }
   .copy.foot .display { font-size: clamp(56px, 17vw, 80px); }
   .copy-center { gap: 16px; }
@@ -319,7 +526,19 @@ img, svg { max-width: 100%; }
   .btn { height: 44px; padding: 0 16px; font-size: 15px; }
   .paper { font-size: 14px; }
   .bench-result { text-align: left; }
+  .story:not(.animated) { padding-top: 60px; }
   .story:not(.animated) .copy-right.wide { align-items: flex-start; }
+  .story.stills .copy.hero { padding: 36px 16px 40px; }
+  .story.stills .copy.side {
+    grid-template-columns: 1fr;
+    padding: 28px 16px;
+    gap: 16px;
+  }
+  .story.stills .still-scene { max-width: 340px; }
+  .story.stills .copy.side .copy-right { align-items: center; text-align: center; }
+  .story.stills .copy.side .stanza { text-align: center; }
+  .scene-rail { right: 8px; gap: 8px; }
+  .a11y-menu { bottom: 124px; }
   .footer-inner { padding: 20px 16px; gap: 12px 20px; }
   .footer-links { margin-left: 0; gap: 16px; }
   .footer-meta { flex-basis: 100%; }

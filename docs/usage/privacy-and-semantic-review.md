@@ -412,6 +412,26 @@ there until it expires.
 
 `export-desired` / `apply-desired` are the reviewable path for version-controlling policy. The
 asymmetry is the point: tightening can flow through gates, widening always requires a human.
+`export-desired --output` writes the file whole or not at all: an existing file at that path is
+replaced only once the new one is complete. The new file keeps the old one's owner, group and
+permissions, and a file that did not exist yet gets your usual default permissions. A symbolic
+link at that path is followed: the file it points to is the one replaced, and the link stays a
+link.
+
+Where a replacement is not possible, or would change more than the content, the export is written
+straight into what is already at the path instead: a device or a pipe, a file that has another
+hard link, a file whose owner a new file cannot be given, a file whose access-control list or
+other extended attributes differ from what a new file in that folder gets, and a writable file in
+a folder that does not allow files to be created or replaced. Access-control lists and extended
+attributes are checked on Linux only. On macOS FinishUP cannot read them, so a file that has them
+is replaced and loses them; set them again after the export.
+
+Only a direct write can stop part-way. If it does, `privacy_desired_output_incomplete` and exit
+code 2 say the file may be incomplete; export again. A path that cannot be written at all (an
+existing folder, a file where a folder should be, a file you are not allowed to write, or a
+read-only folder with no writable file at that path) stops with
+`privacy_desired_output_unwritable` and exit code 2; nothing is saved, so choose a writable file
+path in an existing folder and export again.
 
 Privacy commands bind to the repository derived from their actual working directory. The service
 resolves symlinks and Git's common root and commits it under the installation key. It never stores
@@ -817,6 +837,16 @@ The outcome is three-way, not two-way: on the statuses where the protocol forbid
 means **no provider attempt was made**; where it requires provenance, an attempt happened (which is
 not the same as it being useful); and `failed`/`coordinator_failure` is unconstrained, so it is
 **indeterminate** — never read it as "not attempted".
+
+To see how much of the AI reviewer's input your provider served from its prompt cache, run
+`finishup service diagnostics --reviewer-cache` (`--json` for the machine-readable report). Add
+`--request-id <id>` for one review, with an id the full report lists; it is not the check's request
+ID. The report reads only FinishUP's local, owner-only diagnostics log and shows, for each review
+and in total, the token counts the provider reported, the share of input read from the cache, and
+the cause each uncached part comes from, as far as the counts show it. The log is bounded, so the
+report covers only the reviews it still holds, and a count the provider did not report is shown as
+not reported, never as zero. It sends nothing, and it is a command-line report for you: FinishUP
+does not offer it to your agent as a tool.
 
 If you believe FinishUP disclosed, retained, or logged something these commitments forbid, treat it as
 a security report: [`SECURITY.md`](../../SECURITY.md), not a public issue.

@@ -91,6 +91,17 @@ optional work; it does not rewrite accepted individual rows as summaries or move
 into quarantine merely to fit the state file. Disposable read caches and bounded diagnostic
 detail are reclaimed first. When a safe write cannot preserve accepted records, it fails without
 replacing the previous durable state.
+A workspace state document starts fresh only when no file exists. One that exists but cannot be
+read raises `STORAGE_UNSAFE` (retryable unless the refusal is a permission or symlink one), and one
+that is not a regular file or is empty, oversize, or not a valid state document raises
+`STORAGE_CORRUPT`/`STORAGE_UNSAFE`; every read and write of that workspace fails and the file is
+left byte-identical for repair, never replaced by an empty state that would drop consent and
+accepted rows. A hook pass records it as `observe_exception_public_operation_error`;
+cross-workspace scans skip such a document and propagate a retryable failure (issue #1391).
+Ingest that finds its workspace from the session is such a scan. It raises the retryable failure
+and never answers `consent_missing` for a document it could not read. `observe reconcile` then
+exits with the typed error, and a stream pass run by a hook keeps nothing, so the next reconciling
+hook reads the same rows again.
 
 ### Capacity, pressure, and setting lifetime
 
@@ -655,7 +666,8 @@ record that it had looked. The review packet cannot carry images, so the agent h
   `image/webp`, else `image/unknown`), and the pixel width and height read from the header only
   (PNG `IHDR`, JPEG `SOFn` with a bounded segment walk, GIF, WebP `VP8`/`VP8L`/`VP8X`). An
   unreadable or zero-size header is `image/unknown` with no dimensions. A string that does not
-  decode is not attested. The host's own media label never decides the type.
+  decode is not attested and does not count toward the 8, so the first 8 decodable images in
+  document order are recorded. The host's own media label never decides the type.
 - These facts travel as the closed structural `observed_images` member of a `PostToolUse`
   envelope (control-request 2.9.0, unreleased, additive in place): 1-8 objects with exactly
   `content_digest`, `byte_count`, `media_type`, and optionally both `width` and `height`. The

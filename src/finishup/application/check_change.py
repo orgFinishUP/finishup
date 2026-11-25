@@ -1206,6 +1206,7 @@ _SPACED_JOINING_WORDS: Final = frozenset(
 
 
 _DOT_RELATIVE_HEAD: Final = re.compile(r"[:!?*]*(?P<head>\.\.?/)")
+_DOT_SLASH_PREFIX: Final = re.compile(r"\A(?:\./+)+")
 
 
 def _trim_statement_word(word: str) -> str:
@@ -1214,17 +1215,20 @@ def _trim_statement_word(word: str) -> str:
     A leading ``./`` is kept as the workspace-relative path it names (``./docs/spec.md`` is
     ``docs/spec.md``); a leading ``../`` is refused (empty) rather than stripped to a different
     absolute path (``../shared/spec.md`` is never ``/shared/spec.md``). ``./`` alone stays ``./``.
+    The refusal judges what stripping every leading ``./`` (and the extra slashes after one)
+    leaves: ``./../shared/spec.md`` is refused like ``../shared/spec.md``, and ``.//shared/spec.md``
+    is the workspace's ``shared/spec.md``, never ``/shared/spec.md`` (#1410).
     """
 
     value = word.rstrip(_STATEMENT_WORD_EDGE)
     head = _DOT_RELATIVE_HEAD.match(value)
     if head is None:
         return value.lstrip(_STATEMENT_WORD_EDGE)
-    value = value[head.start("head") :]
-    if value.startswith("../"):
+    value = _DOT_SLASH_PREFIX.sub("", value[head.start("head") :])
+    if not value:
+        return "./"
+    if value == ".." or value.startswith(("../", "/")):
         return ""
-    while value.startswith("./") and len(value) > 2:
-        value = value[2:]
     return value
 
 

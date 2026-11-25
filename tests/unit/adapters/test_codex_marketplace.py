@@ -900,6 +900,141 @@ def test_preview_refuses_extra_plugin_source_file_before_any_install_command(
     assert not any(call[1:3] == ("plugin", "add") for call in runner.calls)
 
 
+def _plugin_tree_bytes(project: Path) -> dict[str, bytes]:
+    source = project / ".agents/plugins/finishup"
+    return {
+        path.relative_to(source).as_posix(): path.read_bytes()
+        for path in source.rglob("*")
+        if path.is_file()
+    }
+
+
+@pytest.mark.parametrize("tree", ["hand_made", "canonical_render", "host_render"])
+def test_preview_says_the_plugin_directory_holds_files_finishup_did_not_write(
+    tmp_path: Path, tree: str
+) -> None:
+    """The reason alone reads as a conflict in the Codex home; the detail names the real cause.
+
+    Every caller that explains ``destination_conflict`` needs it: a directory made by hand, an
+    owner file added to the committed (canonical) render, and one added to the host's render.
+    """
+
+    target, project, home = _target(tmp_path)
+    source = project / ".agents/plugins/finishup"
+    if tree == "hand_made":
+        (source / "notes").mkdir(parents=True)
+        (source / "README.md").write_bytes(b"readme\n")
+        (source / "notes/draft.txt").write_bytes(b"draft\n")
+    else:
+        _install(target, codex_version=None if tree == "canonical_render" else "0.148.0-alpha.6")
+        (source / "notes.md").write_bytes(b"owner notes\n")
+    before = _plugin_tree_bytes(project)
+    runner = _FakeCodex(target, home)
+
+    with pytest.raises(IntegrationError) as caught:
+        _preview_activation(
+            target, executable_path=str(runner.executable), codex_home=home, _run=runner
+        )
+
+    assert caught.value.reason is IntegrationReason.DESTINATION_CONFLICT
+    assert caught.value.safe_details == {"unmanaged_files": True}
+    assert all(call[1:] == ("--version",) for call in runner.calls)
+    assert _plugin_tree_bytes(project) == before
+    assert not (home / "config.toml").exists()
+    assert not (project / ".agents/plugins/marketplace.json").exists()
+
+
+def test_preview_of_an_edited_managed_file_is_not_called_unmanaged(tmp_path: Path) -> None:
+    """An edited managed file is a partial install: no file there needs moving out."""
+
+    target, project, home = _target(tmp_path)
+    _install(target, codex_version=None)
+    hooks = project / ".agents/plugins/finishup/hooks/hooks.json"
+    hooks.write_bytes(hooks.read_bytes() + b"\n")
+
+    with pytest.raises(IntegrationError) as caught:
+        preview_activation(target, codex_home=home)
+
+    assert caught.value.reason is IntegrationReason.PARTIAL_INSTALL
+    assert caught.value.safe_details == {}
+
+
+@pytest.mark.parametrize(
+    ("change", "details"),
+    [("owner_file_added", {"unmanaged_files": True}), ("managed_file_removed", {})],
+)
+def test_a_source_change_between_inspection_and_the_member_walk_keeps_its_cause(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, change: str, details: dict[str, bool]
+) -> None:
+    """Only a path outside the managed inventory is a file FinishUP did not write."""
+
+    import finishup.adapters.integrations.codex_marketplace as marketplace
+    from finishup.adapters.integrations.codex_plugin import PluginInspection
+
+    target, project, _home = _target(tmp_path)
+    _install(target)
+    source = project / ".agents/plugins/finishup"
+
+    def inspect_then_change(
+        inspected: IntegrationTarget, *, codex_version: str | None = None
+    ) -> PluginInspection:
+        inspection = inspect_plugin(inspected, codex_version=codex_version)
+        if change == "owner_file_added":
+            (source / "notes.md").write_bytes(b"owner notes\n")
+        else:
+            (source / "hooks/hooks.json").unlink()
+        return inspection
+
+    monkeypatch.setattr(marketplace, "inspect_plugin", inspect_then_change)
+
+    with pytest.raises(IntegrationError) as caught:
+        marketplace._source_cache_members(  # pyright: ignore[reportPrivateUsage]
+            target, codex_version="0.148.0-alpha.6"
+        )
+
+    assert caught.value.reason is IntegrationReason.DESTINATION_CONFLICT
+    assert caught.value.safe_details == details
+
+
+def test_an_activated_source_with_an_owner_file_is_reported_and_can_still_be_removed(
+    tmp_path: Path,
+) -> None:
+    """#347 for files FinishUP did not write: status reports the tree, it is not an error.
+
+    The tree is byte-present, so it is ``installed_not_activated`` like an edited managed file
+    (never ``active``, never ``not_installed``), and the way out stays open: removal can be
+    previewed and applied, and it leaves the owner's file where it is.
+    """
+
+    target, project, home = _target(tmp_path)
+    _install(target, codex_version=None)
+    runner = _FakeCodex(target, home)
+    activation = _preview_activation(
+        target, executable_path=str(runner.executable), codex_home=home, _run=runner
+    )
+    _apply_activation(
+        target,
+        executable_path=str(runner.executable),
+        codex_home=home,
+        approved_digest=activation.preview_digest,
+        _run=runner,
+    )
+    assert inspect_activation(target, codex_home=home).state is ActivationState.ACTIVE
+    owner_file = project / ".agents/plugins/finishup/notes.md"
+    owner_file.write_bytes(b"owner notes\n")
+
+    inspection = inspect_activation(target, codex_home=home)
+    assert inspection.state is ActivationState.INSTALLED_NOT_ACTIVATED
+    assert inspection.plugin_cached is False
+
+    removal = preview_removal(target, codex_home=home)
+    assert removal.outcome is RemovalOutcome.REMOVE
+    result = apply_removal(target, codex_home=home, approved_digest=removal.preview_digest)
+    assert result.outcome is RemovalOutcome.REMOVE
+    assert not (home / f"plugins/cache/finishup/finishup/{__version__}").exists()
+    assert owner_file.read_bytes() == b"owner notes\n"
+
+
 def test_add_failure_after_copy_preserves_honest_partial_state_for_retry(
     tmp_path: Path,
 ) -> None:
@@ -2974,3 +3109,94 @@ def _assert_bound_plugin_mcp(cache: Path, *, pinned: str, root: str, foreign: st
     }
     assert foreign not in rendered
     assert "finishup hooks" in (cache / "hooks/hooks.json").read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    "body",
+    ["x = " + "1" * 4301 + "\n", "x = " + "[" * 5000 + "]" * 5000 + "\n"],
+    ids=["huge_int", "deep"],
+)
+def test_user_config_tomllib_cannot_load_is_source_invalid(tmp_path: Path, body: str) -> None:
+    """``tomllib`` raises ``ValueError``/``RecursionError`` here, not a decode error (#1484)."""
+
+    target, _project, home = _target(tmp_path)
+    _install(target)
+    (home / "config.toml").write_text(body, encoding="utf-8")
+    with pytest.raises(IntegrationError) as caught:
+        preview_activation(target, codex_home=home)
+    assert caught.value.reason is IntegrationReason.SOURCE_INVALID
+    assert (home / "config.toml").read_text(encoding="utf-8") == body
+
+
+def _versioned_codex(tmp_path: Path) -> tuple[Path, Path]:
+    home = tmp_path / "probe-home"
+    home.mkdir(mode=0o700)
+    executable = tmp_path / "codex-probe"
+    executable.write_text("#!/bin/sh\necho 'codex-cli 0.150.1'\n", encoding="utf-8")
+    executable.chmod(0o700)
+    return executable, home
+
+
+def _counted_probes(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    from finishup.adapters.integrations import codex_marketplace as module
+
+    once = module._probe_codex_binary_once  # pyright: ignore[reportPrivateUsage]
+    probes: list[str] = []
+
+    def counted(executable_path: str, **kwargs: object) -> object:
+        probes.append(executable_path)
+        return once(executable_path, **kwargs)  # pyright: ignore[reportArgumentType]
+
+    monkeypatch.setattr(module, "_probe_codex_binary_once", counted)
+    return probes
+
+
+def test_the_probe_window_starts_one_codex_per_observation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from finishup.adapters.integrations import codex_marketplace as module
+
+    probe = module._probe_codex_binary  # pyright: ignore[reportPrivateUsage]
+    executable, home = _versioned_codex(tmp_path)
+    probes = _counted_probes(monkeypatch)
+    unwindowed = probe(str(executable), codex_home=home)
+    assert probe(str(executable), codex_home=home) == unwindowed
+    assert len(probes) == 2  # Outside a window every probe starts Codex, as before.
+    probes.clear()
+    with module.probe_window():
+        assert probe(str(executable), codex_home=home) == unwindowed
+        with module.probe_window():  # A nested window shares the outer one.
+            assert probe(str(executable), codex_home=str(home)) == unwindowed
+        assert len(probes) == 1
+        # Another home is another binding.
+        other = tmp_path / "other-home"
+        other.mkdir(mode=0o700)
+        assert probe(str(executable), codex_home=other).codex_home == other
+        assert len(probes) == 2
+    probes.clear()
+    probe(str(executable), codex_home=home)
+    assert len(probes) == 1
+
+
+def test_the_probe_window_keeps_refusals_and_injected_runners_unremembered(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from finishup.adapters.integrations import codex_marketplace as module
+
+    probe = module._probe_codex_binary  # pyright: ignore[reportPrivateUsage]
+    executable, home = _versioned_codex(tmp_path)
+    probes = _counted_probes(monkeypatch)
+    missing = str(tmp_path / "missing-codex")
+    target, _project, fake_home = _target(tmp_path)
+    fake = _FakeCodex(target, fake_home)
+    with module.probe_window():
+        for _ in range(2):
+            with pytest.raises(IntegrationError) as refused:
+                probe(missing, codex_home=home)
+            assert refused.value.reason is IntegrationReason.TARGET_UNSAFE
+        # An injected runner is never answered from the window.
+        probe(str(fake.executable), codex_home=fake_home, _run=fake)
+        probe(str(fake.executable), codex_home=fake_home, _run=fake)
+        assert fake.calls.count((str(fake.executable), "--version")) == 2
+        probe(str(executable), codex_home=home)
+    assert len(probes) == 5

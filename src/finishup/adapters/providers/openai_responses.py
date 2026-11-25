@@ -16,7 +16,8 @@ import asyncio
 import hashlib
 import importlib
 import re
-from collections.abc import AsyncIterator, Callable, Mapping
+import sys
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any, Final, Literal, Protocol, cast
@@ -69,6 +70,7 @@ from finishup.protocol.canonical import (
     canonical_encode,
     strict_json_parse,
 )
+from finishup.protocol.deferred_build import ensure_built
 from finishup.protocol.models import (
     MAX_FRESHNESS_VERDICTS,
     MAX_PRIOR_FINDING_VERDICTS,
@@ -119,6 +121,7 @@ __all__ = [
     "RenderedOpenAIRequest",
     "RenderedRequest",
     "classify_provider_failure",
+    "is_transport_timeout",
     "normalize_answer_text",
     "normalize_judgment",
     "normalize_response",
@@ -860,20 +863,22 @@ _SYSTEM_INSTRUCTION: Final = SEMANTIC_REVIEW_INSTRUCTION
 _PROVIDER_JUDGMENT_ADAPTER: Final[TypeAdapter[ProviderJudgmentModel]] = TypeAdapter(
     ProviderJudgmentModel
 )
+# An adapter over a deferred model reuses that model's validator only once the model is built,
+# so each adapter below wraps a model that ensure_built has finished.
 _PRIOR_VERDICT_ADAPTER: Final[TypeAdapter[ProviderPriorFindingVerdictModel]] = TypeAdapter(
-    ProviderPriorFindingVerdictModel
+    ensure_built(ProviderPriorFindingVerdictModel)
 )
 _PROVIDER_JUDGMENT_ENVELOPE_ADAPTER: Final[TypeAdapter[ProviderJudgmentEnvelopeModel]] = (
-    TypeAdapter(ProviderJudgmentEnvelopeModel)
+    TypeAdapter(ensure_built(ProviderJudgmentEnvelopeModel))
 )
 # One adapter per conclusion branch. Used only to classify an already-rejected judgment: the
 # union adapter above decides acceptance, and the branch selected by the stated conclusion
 # yields errors that name one field instead of every branch's disagreement.
 _PROVIDER_JUDGMENT_BRANCH_ADAPTERS: Final[Mapping[str, TypeAdapter[Any]]] = MappingProxyType(
     {
-        "no_material_discrepancy": TypeAdapter(ProviderJudgmentNoDiscrepancyModel),
-        "challenges_returned": TypeAdapter(ProviderJudgmentChallengesModel),
-        "insufficient_packet": TypeAdapter(ProviderJudgmentInsufficientModel),
+        "no_material_discrepancy": TypeAdapter(ensure_built(ProviderJudgmentNoDiscrepancyModel)),
+        "challenges_returned": TypeAdapter(ensure_built(ProviderJudgmentChallengesModel)),
+        "insufficient_packet": TypeAdapter(ensure_built(ProviderJudgmentInsufficientModel)),
     }
 )
 
@@ -2054,7 +2059,7 @@ def normalize_judgment(parsed: JsonValue, *, require_part2: bool = False) -> Sem
 
 
 _REMAINING_CHECK_ADAPTER: Final[TypeAdapter[ProviderRemainingCheckModel]] = TypeAdapter(
-    ProviderRemainingCheckModel
+    ensure_built(ProviderRemainingCheckModel)
 )
 
 
@@ -2076,7 +2081,7 @@ def _separate_remaining_check(body: dict[str, JsonValue]) -> dict[str, JsonValue
 
 
 _TEST_VERDICT_ADAPTER: Final[TypeAdapter[ProviderDeclaredTestVerdictModel]] = TypeAdapter(
-    ProviderDeclaredTestVerdictModel
+    ensure_built(ProviderDeclaredTestVerdictModel)
 )
 
 
@@ -2106,7 +2111,7 @@ def _separate_declared_test_verdicts(body: dict[str, JsonValue]) -> dict[str, Js
 
 
 _FRESHNESS_VERDICT_ADAPTER: Final[TypeAdapter[ProviderFreshnessVerdictModel]] = TypeAdapter(
-    ProviderFreshnessVerdictModel
+    ensure_built(ProviderFreshnessVerdictModel)
 )
 
 
@@ -2229,6 +2234,9 @@ def normalize_response(
 
     Inspection order is fixed: explicit refusal surface first, then the generation status (only a
     completed generation is an answer), parse/schema validity next, and late-arrival state last.
+    The Responses API reports a refusal as a ``refusal`` content part of an output message, on a
+    generation whose status is ``completed`` and whose ``output_text`` is empty; it is a refusal,
+    never an empty answer. The refusal text is read only for presence and is never kept.
 
     ``policy_digest`` is the policy digest that authorized this dispatch, carried by the approved
     case. The adapter never mints one of its own; the outbound gateway rebinds it authoritatively
@@ -2252,8 +2260,7 @@ def normalize_response(
             exchange=exchange,
         )
 
-    refusal = getattr(response, "refusal", None)
-    if type(refusal) is str and refusal:
+    if _response_refused(response):
         return SemanticResultRefused(prov(SemanticStatus.REFUSED))
 
     status = getattr(response, "status", None)
@@ -2279,6 +2286,35 @@ def normalize_response(
     return normalize_answer_text(
         getattr(response, "output_text", None), prov, late=late, reply=exchange is not None
     )
+
+
+def _response_refused(response: object) -> bool:
+    """Whether a Responses result declines the task: a non-empty refusal content part.
+
+    The SDK model carries a refusal inside ``output[*].content[*]`` as ``{"type": "refusal",
+    "refusal": str}``. A top-level ``refusal`` string, which a compatible endpoint may add as an
+    extra field, counts too. Only presence is read; the text itself is never returned or kept.
+    """
+
+    legacy = getattr(response, "refusal", None)
+    if type(legacy) is str and legacy:
+        return True
+    output = getattr(response, "output", None)
+    if not isinstance(output, list | tuple):
+        return False
+    for item in cast(Sequence[object], output):
+        if getattr(item, "type", None) != "message":
+            continue
+        content = getattr(item, "content", None)
+        if not isinstance(content, list | tuple):
+            continue
+        for part in cast(Sequence[object], content):
+            if getattr(part, "type", None) != "refusal":
+                continue
+            refusal = getattr(part, "refusal", None)
+            if type(refusal) is str and refusal:
+                return True
+    return False
 
 
 type _Provenance = Callable[
@@ -2319,6 +2355,28 @@ def normalize_answer_text(
     return SemanticResultLate(prov(SemanticStatus.LATE, None)) if late else result
 
 
+def is_transport_timeout(error: BaseException) -> bool:
+    """Whether ``error`` is a timeout, including the SDK's wrapper around an HTTP timeout.
+
+    The OpenAI SDK re-raises every ``httpx`` timeout as its own ``APITimeoutError`` (a
+    connection-error subclass) chained ``from`` the original, so the explicit ``__cause__``
+    chain is followed. The SDK class is matched only when the SDK is already loaded.
+    """
+
+    sdk = sys.modules.get("openai")
+    sdk_timeout = getattr(sdk, "APITimeoutError", None) if sdk is not None else None
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, httpx.TimeoutException | TimeoutError):
+            return True
+        if isinstance(sdk_timeout, type) and isinstance(current, sdk_timeout):
+            return True
+        current = current.__cause__
+    return False
+
+
 def classify_provider_failure(
     error: BaseException,
     profile: OpenAIProfile,
@@ -2339,7 +2397,7 @@ def classify_provider_failure(
             failure_class=failure,
         )
 
-    if isinstance(error, httpx.TimeoutException | TimeoutError):
+    if is_transport_timeout(error):
         return SemanticResultTimeout(prov(SemanticStatus.TIMEOUT, SemanticFailureClass.TIMEOUT))
     if isinstance(error, httpx.TransportError):
         return SemanticResultUnavailable(
@@ -2358,6 +2416,10 @@ def classify_provider_failure(
         failure_class = SemanticFailureClass.AUTHORIZATION
     elif status_code == 429:
         failure_class = SemanticFailureClass.RATE_LIMITED
+    elif status_code == 404:
+        # An endpoint that does not serve the Responses path is an unsupported profile, not a
+        # transport fault; the Chat Completions classifier records the same condition alike.
+        failure_class = SemanticFailureClass.UNSUPPORTED_PROFILE
     elif type(status_code) is int and status_code >= 500:
         failure_class = SemanticFailureClass.PROVIDER_OUTAGE
     return SemanticResultUnavailable(prov(SemanticStatus.UNAVAILABLE, failure_class))
@@ -2624,18 +2686,22 @@ class OpenAIResponsesEvaluator:
 
         finished = self._clock.monotonic_seconds()
         if case.purpose != "credential-probe":
+            reported = getattr(response, "usage", None)
+            usage = api_exchange_usage(
+                reported,
+                input_name="input_tokens",
+                details_name="input_tokens_details",
+                output_name="output_tokens",
+            )
             record_exchange_cache(
                 component="openai_responses",
                 request_id=case.request_id,
                 session=CURRENT_REVIEWER_SESSION.get(),
                 exchange=exchange,
                 settings={key: value for key, value in body_object.items() if key != "input"},
-                usage=api_exchange_usage(
-                    getattr(response, "usage", None),
-                    input_name="input_tokens",
-                    details_name="input_tokens_details",
-                    output_name="output_tokens",
-                ),
+                usage=usage,
+                # A usage object whose required counts FinishUP refused, not a missing one.
+                usage_refused=usage is None and reported is not None,
                 completed=getattr(response, "status", None) == "completed",
             )
         return normalize_response(

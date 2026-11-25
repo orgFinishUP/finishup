@@ -373,6 +373,72 @@ def test_install_refuses_locally_modified_file(
     }
 
 
+@pytest.mark.parametrize("replace_modified", [False, True])
+def test_reinstall_refuses_and_keeps_an_owner_file_added_to_the_plugin_tree(
+    tmp_path: Path, replace_modified: bool
+) -> None:
+    """ADR-023 §9: whole-directory replacement never removes unmanaged content.
+
+    ``replace_modified`` covers edited managed files only, never files FinishUP did not write.
+    """
+
+    tmp_path.chmod(0o700)
+    resources = _resources()
+    target = IntegrationTarget(IntegrationScope.TRUSTED_PROJECT, str(tmp_path))
+    install_plugin(target, resource_source=resources, allow_untested=True)
+    destination = tmp_path / ".agents/plugins/finishup"
+    owner_file = destination / "skills/finishup/my-notes.md"
+    owner_file.write_bytes(b"owner content\n")
+
+    inspection = inspect_plugin(target, resource_source=resources)
+    assert inspection.presence is PluginHookPresence.INSTALLED_UNTRUSTED_UNKNOWN
+    assert inspection.state is IntegrationState.MODIFIED
+
+    with pytest.raises(IntegrationError) as caught:
+        install_plugin(
+            target,
+            resource_source=resources,
+            allow_untested=True,
+            replace_modified=replace_modified,
+        )
+
+    assert caught.value.reason is IntegrationReason.DESTINATION_CONFLICT
+    assert caught.value.safe_details == {"unmanaged_files": True}
+    assert owner_file.read_bytes() == b"owner content\n"
+    assert sorted(path.name for path in destination.parent.iterdir()) == ["finishup"]
+
+
+def test_install_refuses_and_keeps_a_foreign_plugin_directory(tmp_path: Path) -> None:
+    tmp_path.chmod(0o700)
+    foreign = tmp_path / ".agents/plugins/finishup"
+    foreign.mkdir(parents=True)
+    (foreign / "README.md").write_bytes(b"someone else's plugin\n")
+    target = IntegrationTarget(IntegrationScope.TRUSTED_PROJECT, str(tmp_path))
+
+    with pytest.raises(IntegrationError) as caught:
+        install_plugin(target, resource_source=_resources(), allow_untested=True)
+
+    assert caught.value.reason is IntegrationReason.DESTINATION_CONFLICT
+    assert (foreign / "README.md").read_bytes() == b"someone else's plugin\n"
+    assert sorted(path.name for path in foreign.iterdir()) == ["README.md"]
+
+
+def test_inspect_digest_covers_unmanaged_files(tmp_path: Path) -> None:
+    """The preview binding changes when an unmanaged file appears or changes."""
+
+    tmp_path.chmod(0o700)
+    resources = _resources()
+    target = IntegrationTarget(IntegrationScope.TRUSTED_PROJECT, str(tmp_path))
+    exact = install_plugin(target, resource_source=resources, allow_untested=True)
+    owner_file = tmp_path / ".agents/plugins/finishup/notes.md"
+    owner_file.write_bytes(b"first\n")
+    first = inspect_plugin(target, resource_source=resources)
+    owner_file.write_bytes(b"second\n")
+    second = inspect_plugin(target, resource_source=resources)
+
+    assert len({exact.installed_digest, first.installed_digest, second.installed_digest}) == 3
+
+
 def test_install_replaces_prior_managed_variant_render_without_replace_modified(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

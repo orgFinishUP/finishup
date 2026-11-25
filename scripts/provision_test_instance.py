@@ -8,11 +8,12 @@ One instance is one directory tree beneath a short, owner-private base outside e
                              cache, log) sealed by the instance-identity marker
     <base>/<tag>/provenance.json   digest-only record of what was built and from where
 
-``create`` builds the wheel with ``uv build --no-sources`` from the exact revision (refusing a
-modified working tree unless ``--allow-dirty``), installs it into the runtime with ``uv``, and lets
-the snapshot's own ``finishup instance create --bind-runtime`` seal the root. Because the runtime is
-pinned, ``<base>/<tag>/runtime/bin/finishup`` resolves that root even when a host or shell drops the
-environment variable, and never the everyday installation.
+``create`` builds the wheel with ``uv build --no-sources`` from the exact revision, exported with
+``git archive`` even for ``HEAD`` so untracked and ignored files never ship (refusing a modified
+working tree unless ``--allow-dirty``, which builds that working tree as is), installs it into the
+runtime with ``uv``, and lets the snapshot's own ``finishup instance create --bind-runtime`` seal
+the root. Because the runtime is pinned, ``<base>/<tag>/runtime/bin/finishup`` resolves that root
+even when a host or shell drops the environment variable, and never the everyday installation.
 
 ``dispose`` never leaves a launcher that has lost its pin, which would run ambient and reach the
 everyday install (issue #1350):
@@ -319,17 +320,18 @@ def command_create(args: argparse.Namespace) -> dict[str, object]:
     try:
         sha, is_head = _resolve_revision(checkout, args.revision)
         source_state = "clean"
-        source = checkout
-        if is_head:
-            if _tree_modified(checkout):
-                if not args.allow_dirty:
-                    raise _fail(
-                        "checkout_modified: the working tree differs from HEAD; commit, stash, "
-                        "pass --revision <commit>, or pass --allow-dirty to record source_state "
-                        "modified"
-                    )
-                source_state = "modified"
+        if is_head and _tree_modified(checkout):
+            if not args.allow_dirty:
+                raise _fail(
+                    "checkout_modified: the working tree differs from HEAD; commit, stash, "
+                    "pass --revision <commit>, or pass --allow-dirty to record source_state "
+                    "modified"
+                )
+            source_state = "modified"
+            source = checkout
         else:
+            # A clean build is built from the revision itself, never the working tree, so files
+            # the revision does not track (untracked or ignored, under src/ too) cannot ship.
             _export_revision(checkout, sha, layout["src"])
             source = layout["src"]
         wheel = _build_wheel(source, layout["dist"])

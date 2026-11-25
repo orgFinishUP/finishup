@@ -148,7 +148,8 @@ _RESOURCE_LIMIT: Final = 4_194_304
 # ADR-054: +1 schema (config 1.4.0 with the ``[server]`` table); v0.3.0's 1.3.0 stays frozen.
 # ADR-054 (U20): +1 schema (content-forgotten 1.0.0), +1 bundle migration (0020).
 # main (#1348): +2 schemas (receipt-result 1.4.1 and version manifest 2.3.1, frozen here).
-REVIEWED_RESOURCE_COUNT: Final = 372
+# #1172: +1 schema (reviewer-cache-report 1.0.0, the owner-only reviewer cache report).
+REVIEWED_RESOURCE_COUNT: Final = 373
 _RESOURCE_KINDS: Final = frozenset(
     {
         "canonical_vector",
@@ -203,6 +204,7 @@ _REQUEST_RESULT_VERSIONS: Final = (
     ("respond-result", "1.1.0"),
     ("review-packet-row", "2.0.0"),
     ("review-result", "7.0.0"),
+    ("reviewer-cache-report", "1.0.0"),
     ("reviewer-reply", "1.0.0"),
     ("rest-agent", "1.0.0"),
     ("rest-agent-declaration", "1.0.0"),
@@ -600,8 +602,26 @@ def _entry_from_json(value: JsonValue) -> _ResourceEntry:
     )
 
 
+# The last manifest that verified, keyed on its exact bytes. The bytes are re-read on every load,
+# so a changed install is still seen and fully re-verified; a failure is never stored, so every
+# integrity error still comes from a fresh evaluation. The result is a frozen dataclass of tuples
+# and a pure function of the bytes, so sharing it is unobservable. One slot keeps memory bounded,
+# and the tuple is replaced in a single assignment.
+_verified_manifest: tuple[bytes, _ResourceManifest] | None = None
+
+
 def _load_resource_manifest() -> _ResourceManifest:
+    global _verified_manifest
     raw = _package_bytes("manifest.json")
+    verified = _verified_manifest
+    if verified is not None and verified[0] == raw:
+        return verified[1]
+    manifest = _resource_manifest_from(raw)
+    _verified_manifest = (raw, manifest)
+    return manifest
+
+
+def _resource_manifest_from(raw: bytes) -> _ResourceManifest:
     manifest = _canonical_document(raw, limit=_MANIFEST_LIMIT, reason="manifest_invalid")
     if set(manifest) != {
         "entries",

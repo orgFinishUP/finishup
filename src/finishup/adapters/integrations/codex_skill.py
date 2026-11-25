@@ -195,6 +195,28 @@ def _resource_entries(
         raw = source.read_bytes("manifest.json")
     except (FileNotFoundError, ModuleNotFoundError, OSError) as exc:
         raise _error(IntegrationReason.SOURCE_INVALID) from exc
+    key = hashlib.sha256(raw).digest()
+    validated = _VALIDATED_RESOURCE_MANIFESTS.get(key)
+    if validated is None:
+        validated = _validated_resource_manifest(raw)
+        if len(_VALIDATED_RESOURCE_MANIFESTS) >= _VALIDATED_RESOURCE_MANIFEST_LIMIT:
+            _VALIDATED_RESOURCE_MANIFESTS.clear()
+        _VALIDATED_RESOURCE_MANIFESTS[key] = validated
+    return validated
+
+
+# Validation of a resource manifest is a pure function of its bytes; one status or plan reads
+# the same packaged manifest several times. Only manifests that validated are remembered, so
+# every refusal is still raised where and when it was before.
+_VALIDATED_RESOURCE_MANIFEST_LIMIT: Final = 4
+_VALIDATED_RESOURCE_MANIFESTS: dict[
+    bytes, tuple[Mapping[str, JsonValue], Mapping[str, Mapping[str, JsonValue]]]
+] = {}
+
+
+def _validated_resource_manifest(
+    raw: bytes,
+) -> tuple[Mapping[str, JsonValue], Mapping[str, Mapping[str, JsonValue]]]:
     manifest = _canonical_json(raw, IntegrationReason.SOURCE_INVALID)
     expected_keys = {"schema", "package", "resource_set_version", "entries", "resource_set_digest"}
     if set(manifest) != expected_keys or manifest.get("schema") != "yoetz.resource-manifest/1":

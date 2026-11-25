@@ -448,7 +448,7 @@ def test_work_detail_renders_unknown_count_without_inventing_zero() -> None:
     detail = type(detail)(
         item=detail.item,
         claims=detail.claims,
-        evidence_count=None,
+        open_obligation_count=None,
         checks=detail.checks,
         coverage=detail.coverage,
         findings=detail.findings,
@@ -456,7 +456,7 @@ def test_work_detail_renders_unknown_count_without_inventing_zero() -> None:
         receipt_available=detail.receipt_available,
     )
 
-    assert "Evidence             unknown" in render_work_detail(detail, 100)
+    assert "Open obligations     unknown" in render_work_detail(detail, 100)
 
 
 def test_receipt_foregrounds_the_verdict_and_what_was_not_verified(

@@ -342,7 +342,20 @@ contradicts the README exclusion above. A sixth class is added instead.
   a binary section makes it an ordinary edit, and a pair names both its paths, so a rename from a
   source file into `docs/` is one too. A `git apply` that reports (`--check`, `--stat`,
   `--numstat`, `--summary`) writes nothing unless `--apply` or `--reject` turns applying back on;
-  an option the reader does not know (an abbreviation included) counts as applying (#1106 r4).
+  an option the reader does not know (an abbreviation included) counts as applying (#1106 r4). The
+  patch is the heredoc body up to the line bash closes it on, exactly the delimiter (leading tabs
+  ignored only for `<<-`): a context line ` EOF` in a section is patch data, never the end (#1450).
+  When the only closing line is one bash does not accept (the delimiter with a trailing blank, or
+  indented without `<<-`), the body runs to the end of the command: bash warns and still feeds
+  all of it to the patch tool, which applies it, so the patch is read to there and the files it
+  names are written. Only the first such heredoc fed to a patch tool is read that way (a later
+  one lies inside its body). A `<<` with no closing line of either kind, or one that feeds
+  anything else, may be an arithmetic shift or quoted text: the rest of the command is not taken
+  as its body, and it names nothing.
+  Its delimiter is read by the same rule as the lexer's (ADR-045): the word after `<<`, quotes and
+  backslashes removed, so `<<\EOF` and `<<'END-PATCH'` feed a patch too; a patch tool fed a
+  delimiter the reader cannot read (an escape inside `$'...'`) applies a patch it cannot place,
+  so it is unplaced (#1451).
 
   Rows recorded before the class existed, or while an older service held the singleton, keep
   counting as before (an edit-tool row with no scope, a shell row with `write workspace`). An older

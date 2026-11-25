@@ -43,6 +43,11 @@ batches plus one import-report evidence event, and consumes the authorization at
 completion. A changed source, manifest, request target, session, profile/version, mapping version,
 plan, or limit contract needs a new preview and decision.
 
+A replay made while that consent is still being reviewed, or while another authorized import is
+finishing, returns retryable `OPERATION_PENDING`; replay the same request once the review or the
+other import is done. If the local consent record itself is unreadable, the import returns
+non-retryable `STORAGE_CORRUPT` and publishes nothing; inspect `finishup consent status --json`.
+
 The parser excludes reasoning and keeps malformed, unknown, oversized, or unsupported records as
 explicit coverage gaps. The encrypted exact source remains local. Imported events therefore prove
 only what the bounded import observed; they do not gain cooperative authorship or hook-observed

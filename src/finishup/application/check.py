@@ -1329,6 +1329,10 @@ _PROJECT_ADVICE_AUTHORITY_REFUSALS: Final = frozenset(
 )
 
 
+_MAX_PROJECT_ADVISORY_NOTES: Final = 64
+"""``CheckCommitResult.advisory_notes`` and the ``check-result`` wire both hold at most 64."""
+
+
 async def _current_project_advisory_notes(
     app: Application,
     task_id: str,
@@ -1508,7 +1512,9 @@ async def _current_project_advisory_notes(
                     if final_members != counterpart_ids:
                         counterpart_ids = ()
                         duplicate_task_ids = ()
-            if counterpart_ids:
+            # A project can add two notes, so the bound is checked before each one: the cut
+            # stays deterministic in project order and never exceeds the result's own limit.
+            if counterpart_ids and len(notes) < _MAX_PROJECT_ADVISORY_NOTES:
                 try:
                     notes.append(
                         CheckAdvisoryNote(
@@ -1522,7 +1528,7 @@ async def _current_project_advisory_notes(
                     # IDs are validated again at the structural result boundary.  An invalid adapter
                     # row is not allowed to become a public note or affect the check itself.
                     pass
-            if counterpart_ids and duplicate_task_ids:
+            if counterpart_ids and duplicate_task_ids and len(notes) < _MAX_PROJECT_ADVISORY_NOTES:
                 try:
                     notes.append(
                         CheckAdvisoryNote(
@@ -1534,7 +1540,7 @@ async def _current_project_advisory_notes(
                     )
                 except (TypeError, ValueError):
                     pass
-        if len(notes) >= 64:
+        if len(notes) >= _MAX_PROJECT_ADVISORY_NOTES:
             break
     return tuple(notes)
 
@@ -2403,7 +2409,19 @@ async def _attach_current_project_advisory_notes(
     """Attach current advice without changing the frozen result or replay semantics."""
 
     notes = await _current_project_advisory_notes(app, task_id, result.findings)
-    return result if result.advisory_notes == notes else replace(result, advisory_notes=notes)
+    if result.advisory_notes == notes:
+        return result
+    try:
+        return replace(result, advisory_notes=notes)
+    except (TypeError, ValueError) as exc:
+        # The check is already committed (or is being replayed). Advice the result cannot carry
+        # is dropped with a diagnostic; it never turns a recorded verdict into a failed request.
+        record_unexpected_exception_without_raising(
+            exc,
+            component="check",
+            operation="project_advisory_attach",
+        )
+        return result
 
 
 @dataclass(frozen=True, slots=True)
@@ -3045,7 +3063,7 @@ def _response_identity(
     assessment: DeterministicAssessment,
     fact_code: str,
 ) -> tuple[FindingBasisRef, ...] | None:
-    """Return the (finding, response event, admissible evidence) refs a response rule reported."""
+    """Return every (finding, response event, admissible evidence) ref a response rule reported."""
 
     for fact in assessment.basis.observed_facts:
         if fact.fact_code == fact_code:
@@ -3065,21 +3083,30 @@ def _collapse_response_overlap(
     re-deriving its predicate inside work-integrity -- means a research pack that was deselected,
     scope-excluded, skipped as unavailable, or that failed leaves the work-integrity finding
     standing instead of silently losing it.
+
+    Each rule reports every response on one subject together (#1453). The work-integrity finding
+    is dropped only when research-evidence reported every response it names on the same subject;
+    one stale or work-only response in the group keeps it standing.
     """
 
-    rejected = {
-        identity
-        for item in assessments
-        if item.candidate.kind is FindingKind.QUESTIONABLE_FINDING_REJECTION
-        and (identity := _response_identity(item, RESEARCH_REJECTION_PRESENT_FACT)) is not None
-    }
+    rejected: dict[tuple[str, ...], frozenset[FindingBasisRef]] = {}
+    for item in assessments:
+        if item.candidate.kind is FindingKind.QUESTIONABLE_FINDING_REJECTION and (
+            identity := _response_identity(item, RESEARCH_REJECTION_PRESENT_FACT)
+        ):
+            rejected[tuple(item.candidate.subject_refs)] = frozenset(identity)
     if not rejected:
         return assessments
+
+    def covered(item: DeterministicAssessment) -> bool:
+        reported = _response_identity(item, WORK_RESPONSE_PRESENT_FACT)
+        research = rejected.get(tuple(item.candidate.subject_refs))
+        return reported is not None and research is not None and research.issuperset(reported)
+
     return tuple(
         item
         for item in assessments
-        if item.candidate.kind is not FindingKind.WEAK_OR_STALE_RESPONSE
-        or _response_identity(item, WORK_RESPONSE_PRESENT_FACT) not in rejected
+        if item.candidate.kind is not FindingKind.WEAK_OR_STALE_RESPONSE or not covered(item)
     )
 
 
@@ -4078,6 +4105,11 @@ def _validate_reviewer_snippets(
 
     A verified row reads as support, so it keeps the stricter rule: it is dropped when any cited
     ref was not sent or its required quote cannot be proved.
+
+    A recovered response has no text index, so each item is decided on its own: a quote-free
+    challenge or verified row is kept as recorded, a quote-bearing challenge is handled as one
+    with no sent ref, and a quote-bearing verified row is dropped as a snippet loss. One item's
+    quote never changes how its siblings are fenced.
     """
 
     from finishup.application.review_quotes import prove_quote
@@ -4093,33 +4125,10 @@ def _validate_reviewer_snippets(
         if citable_refs is None
         else citable_refs & included_refs
     )
-    # A recovered response from before the exact provider-bound text index existed has no proof
-    # for a newly added quote. Keep legacy judgments without snippets readable.
-    if (
-        provider_input_text_by_ref is None
-        and not any(challenge.snippet is not None for challenge in judgment.challenges)
-        and not any(item.snippet is not None for item in judgment.verified)
-    ):
-        remaining = judgment.strongest_remaining_check
-        if remaining is None:
-            return _ReviewerQuoteFence(judgment)
-        # One left with no recorded-sent ref is removed and disclosed, as on a fresh run.
-        kept_refs = tuple(
-            ref
-            for ref in remaining.cited_refs
-            if recorded_sent is not None and ref in recorded_sent
-        )
-        if len(kept_refs) == len(remaining.cited_refs):
-            return _ReviewerQuoteFence(judgment)
-        return _ReviewerQuoteFence(
-            replace(
-                judgment,
-                strongest_remaining_check=(
-                    replace(remaining, cited_refs=kept_refs) if kept_refs else None
-                ),
-            ),
-            refs_reduced=1,
-        )
+    # A recovered response (no text index) has no proof for a quote, but a quote-free item needs
+    # none: it is kept as recorded. Each item is decided on its own, so one quote-bearing item
+    # never changes how a quote-free sibling is fenced (issue #1409).
+    recovered = provider_input_text_by_ref is None
 
     # Without the text index nothing is proven sent.
     sent = frozenset(() if provider_input_text_by_ref is None else provider_input_text_by_ref)
@@ -4131,6 +4140,9 @@ def _validate_reviewer_snippets(
     snippet_losses = 0
     challenges: list[ReviewerChallenge] = []
     for challenge in judgment.challenges:
+        if recovered and challenge.snippet is None:
+            challenges.append(challenge)
+            continue
         kept_refs = tuple(ref for ref in challenge.cited_refs if ref in carried)
         if not kept_refs:
             if citable_refs is not None and not any(
@@ -4158,6 +4170,13 @@ def _validate_reviewer_snippets(
 
     verified: list[VerifiedReviewItem] = []
     for item in judgment.verified:
+        if recovered:
+            if item.snippet is None:
+                verified.append(item)
+            else:
+                # Its required quote cannot be proved without the text index.
+                snippet_losses += 1
+            continue
         if any(ref not in carried for ref in item.cited_refs):
             refs_reduced += 1
             continue

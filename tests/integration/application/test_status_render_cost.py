@@ -44,6 +44,7 @@ from typing import Any, Final, Protocol, cast
 import pytest
 from mcp import types
 
+from builders.canonical_reference import reference_canonical_text
 from builders.start_application import protocol_id
 from builders.status_render_cost import (
     CLOSURE_VIEWS,
@@ -325,15 +326,19 @@ _PROFILED: Final = (
 def _baseline_unit(wire: dict[str, JsonValue]) -> float:
     """CPU seconds to canonically encode one rendered page ten times: this run's unit of work.
 
-    Canonical encoding is pure Python over the same bytes a page carries, so it slows down with a
-    loaded or slower runner exactly as rendering does, and the #916 changes do not touch it.
+    The unit is the pure-Python canonical walker as it stood when the limits were calibrated,
+    frozen in ``builders.canonical_reference``: it slows down with a loaded or slower runner
+    exactly as rendering does, and no later change to the production encoder moves it.
+    Rendering itself uses the faster production encoder (the plain-value C fast path), so the
+    measured ratios fell (page about 16.5 -> 11.6); the limits are deliberately left where they
+    were calibrated rather than tightened to the faster codec.
     """
 
     samples: list[float] = []
     for _ in range(_REPEATS):
         started = time.process_time()
         for _ in range(10):
-            canonical_encode(wire)
+            reference_canonical_text(wire).encode("utf-8")
         samples.append(time.process_time() - started)
     return min(samples)
 

@@ -45,6 +45,7 @@ from finishup.cli.exits import (
     remediation_message,
 )
 from finishup.cli.helper import helper_app
+from finishup.cli.lazy_command import LazyTyper
 from finishup.cli.project import project_app
 from finishup.cli.render import (
     bounded_failure_line,
@@ -133,7 +134,12 @@ _INLINE = Annotated[
 _JSON = Annotated[bool, typer.Option("--json", help="Emit canonical JSON.")]
 _DEADLINE = Annotated[
     int | None,
-    typer.Option("--deadline-ms", min=1, max=86_400_000),
+    typer.Option(
+        "--deadline-ms",
+        min=1,
+        max=86_400_000,
+        help="Bound the call to this many milliseconds; a timeout leaves the outcome unknown.",
+    ),
 ]
 
 
@@ -141,7 +147,8 @@ class _MutableBinaryReader(Protocol):
     def readinto(self, buffer: memoryview) -> int | None: ...
 
 
-app = typer.Typer(
+# Its call converts only the invoked command's path to click (``finishup.cli.lazy_command``).
+app = LazyTyper(
     name="finishup",
     help=f"Local-first evidence ledger and review engine. {RENAME_NOTE} https://finishup.dev",
     epilog=AGENT_START_HANDOFF,
@@ -1638,7 +1645,11 @@ def observe_resume_cmd(
 def observe_revoke_cmd(
     workspace: Annotated[str, typer.Option("--workspace")],
 ) -> None:
-    """Stop new ingest permanently; retained evidence is kept."""
+    """Withdraw observation consent; retained evidence is kept. Grant again to resume.
+
+    With a server elsewhere in use (reached over SSH or HTTPS), the withdrawal
+    cannot be finished yet, so a later grant for the same workspace is refused.
+    """
 
     _finish(_observe_operation("revoke_observation")(workspace=workspace))
 
@@ -1860,7 +1871,10 @@ _TASK_STATEMENT_FILE = Annotated[
 ]
 
 
-@app.command("start")
+@app.command(
+    "start",
+    help="Open a task, or attach to an existing one, and get a session.",
+)
 def start_command(
     input_path: _INPUT = None,
     request: _INLINE = None,
@@ -1883,7 +1897,10 @@ def start_command(
     )
 
 
-app.command("publish-work")(_workflow_command("publish_work", PublishWorkRequest))
+app.command(
+    "publish-work",
+    help="Record facts about the work, such as a plan, claims, actions, results and evidence.",
+)(_workflow_command("publish_work", PublishWorkRequest))
 
 
 @app.command("record-test")
@@ -1938,7 +1955,14 @@ def record_test_command(
     )
 
 
-@app.command("check")
+@app.command(
+    "check",
+    help=(
+        "Run the local policy packs over the recorded state, plus the AI-powered review when "
+        "the task's review mode or the request's mode calls for it, and return findings with "
+        "their coverage."
+    ),
+)
 def check_command(
     input_path: _INPUT = None,
     request: _INLINE = None,
@@ -1970,11 +1994,23 @@ def check_command(
     )
 
 
-app.command("respond")(_workflow_command("respond", RespondRequest))
-app.command("status")(_workflow_command("status", StatusRequest))
+app.command(
+    "respond",
+    help=(
+        "Answer a finding: act on it, supply evidence, revise the claim, dispute it, or state a "
+        "limitation."
+    ),
+)(_workflow_command("respond", RespondRequest))
+app.command(
+    "status",
+    help="Read the task's current state, for example after a resume, a compaction or a handoff.",
+)(_workflow_command("status", StatusRequest))
 
 
-@app.command("receipt")
+@app.command(
+    "receipt",
+    help="Show the summary of what was checked, at what coverage, and what remains open.",
+)
 def receipt_command(
     input_path: _INPUT = None,
     request: _INLINE = None,
@@ -2362,17 +2398,50 @@ def _support_command(method: str) -> Callable[..., None]:
     return command
 
 
-app.command("import")(_support_command("import_codex_jsonl"))
-app.command("review")(_support_command("review"))
-backup_app.command("preview")(_support_command("backup_preview"))
-backup_app.command("execute")(_support_command("backup_execute"))
-restore_app.command("preview")(_support_command("restore_preview"))
-restore_app.command("execute")(_support_command("restore_execute"))
-migrate_app.command("preview")(_support_command("migrate_preview"))
-migrate_app.command("execute")(_support_command("migrate_execute"))
-privacy_app.command("show")(_support_command("privacy_get_effective"))
-privacy_app.command("propose")(_support_command("privacy_propose_policy"))
-privacy_app.command("tighten")(_support_command("privacy_tighten_policy"))
+app.command(
+    "import",
+    help="Import a retained codex exec --json stream into an open FinishUP session.",
+)(_support_command("import_codex_jsonl"))
+app.command(
+    "review",
+    help="Review only the recorded evidence of imported sources, at a fixed frontier.",
+)(_support_command("review"))
+backup_app.command(
+    "preview",
+    help="Preview a backup and print the plan to confirm.",
+)(_support_command("backup_preview"))
+backup_app.command(
+    "execute",
+    help="Run a confirmed backup plan.",
+)(_support_command("backup_execute"))
+restore_app.command(
+    "preview",
+    help="Preview a restore and print the plan to confirm.",
+)(_support_command("restore_preview"))
+restore_app.command(
+    "execute",
+    help="Run a confirmed restore plan.",
+)(_support_command("restore_execute"))
+migrate_app.command(
+    "preview",
+    help="Preview a migration and print the plan to confirm.",
+)(_support_command("migrate_preview"))
+migrate_app.command(
+    "execute",
+    help="Run a confirmed migration plan.",
+)(_support_command("migrate_execute"))
+privacy_app.command(
+    "show",
+    help="Show the current effective privacy policy.",
+)(_support_command("privacy_get_effective"))
+privacy_app.command(
+    "propose",
+    help="Propose a privacy policy change for your decision.",
+)(_support_command("privacy_propose_policy"))
+privacy_app.command(
+    "tighten",
+    help="Tighten the privacy policy.",
+)(_support_command("privacy_tighten_policy"))
 
 
 async def _run_privacy_setup_command() -> int:
@@ -2815,9 +2884,18 @@ def _service_command(method: str) -> Callable[..., None]:
     return command
 
 
-service_app.command("status")(_service_command("service_status"))
-service_app.command("lock")(_service_command("lock"))
-service_app.command("stop")(_service_command("stop"))
+service_app.command(
+    "status",
+    help="Report whether the service is running and the vault is unlocked.",
+)(_service_command("service_status"))
+service_app.command(
+    "lock",
+    help="Lock the vault of the running service.",
+)(_service_command("lock"))
+service_app.command(
+    "stop",
+    help="Stop the running service.",
+)(_service_command("stop"))
 
 
 async def _service_start(json_output: bool) -> int:
@@ -3337,16 +3415,38 @@ def service_diagnostics(
     ] = None,
     request_id: Annotated[
         str | None,
-        typer.Option("--request-id", help="Exact check request ID for joined failure stages."),
+        typer.Option(
+            "--request-id",
+            help=(
+                "Exact request ID: a check's, for its joined failure stages, or a review's first "
+                "provider request ID, for its exchange_cache records."
+            ),
+        ),
     ] = None,
+    reviewer_cache: Annotated[
+        bool,
+        typer.Option(
+            "--reviewer-cache",
+            help=(
+                "Report reviewer prompt-cache use from the exchange_cache records still in the "
+                "log: every review's, or one review's with --request-id."
+            ),
+        ),
+    ] = False,
     json_output: _JSON = False,
 ) -> None:
-    """Resolve one durable owner-only diagnostic record by correlation id."""
+    """Resolve durable owner-only diagnostic records, or report reviewer prompt-cache use."""
 
     try:
         from finishup.observability.diagnostics import lookup_diagnostic_records
         from finishup.protocol.ids import IdKind, validate_id
 
+        if reviewer_cache:
+            # #1172: no selector reports every review in the ring; --request-id narrows it to one.
+            if correlation_id is not None:
+                raise ValueError("diagnostic_selector_invalid")
+            _service_diagnostics_reviewer_cache(request_id, json_output=json_output)
+            return
         if correlation_id is not None:
             validate_id(IdKind.CORRELATION, correlation_id)
         records = lookup_diagnostic_records(correlation_id, request_id=request_id)
@@ -3363,6 +3463,22 @@ def service_diagnostics(
         _finish(0 if records else 1)
     except (OSError, TypeError, ValueError):
         _finish(_usage_failure())
+
+
+def _service_diagnostics_reviewer_cache(request_id: str | None, *, json_output: bool) -> None:
+    """Print the reviewer cache report; exit 1 when the log holds no matching record."""
+
+    from finishup.cli.reviewer_cache import reviewer_cache_text
+    from finishup.domain.reviewer_cache_report import reviewer_cache_report
+    from finishup.observability.diagnostics import lookup_exchange_cache_records
+
+    records = lookup_exchange_cache_records(request_id=request_id)
+    report = reviewer_cache_report(records, request_id=request_id)
+    if json_output:
+        _stdout_json(cast(JsonValue, report))
+    else:
+        typer.echo(reviewer_cache_text(report))
+    _finish(0 if records else 1)
 
 
 @mcp_app.command("serve")
@@ -3467,7 +3583,7 @@ async def _integration(action: str, harness: str, json_output: bool) -> int:
         _human_or_json(result, json_output=json_output)
         return 0
     except ControlError as error:
-        return _control_failure(error)
+        return _control_failure(error, json_output=json_output)
 
 
 @integrate_app.callback()
@@ -3489,8 +3605,19 @@ def _integration_command(action: str) -> Callable[..., None]:
     return command
 
 
-for _action in ("preview", "install", "status", "remove"):
-    integrate_skill_app.command(_action)(_integration_command(_action))
+_SKILL_COMMAND_HELP: Final[Mapping[str, str]] = MappingProxyType(
+    {
+        "preview": "Preview the FinishUP skill integration (Codex only).",
+        "install": "Install the FinishUP skill (Codex only).",
+        "status": "Report the FinishUP skill's installed state (Codex only).",
+        "remove": "Remove the FinishUP skill (Codex only).",
+    }
+)
+
+for _action in _SKILL_COMMAND_HELP:
+    integrate_skill_app.command(_action, help=_SKILL_COMMAND_HELP[_action])(
+        _integration_command(_action)
+    )
 
 
 _CODEX_PATH = Annotated[
@@ -3569,8 +3696,20 @@ def _integration_mcp_command(action: str) -> Callable[..., None]:
     return command
 
 
-for _mcp_action in ("preview", "preview-remove", "install", "status", "remove"):
-    integrate_mcp_app.command(_mcp_action)(_integration_mcp_command(_mcp_action))
+_MCP_COMMAND_HELP: Final[Mapping[str, str]] = MappingProxyType(
+    {
+        "preview": "Render the exact plan and digest for registering the FinishUP MCP server.",
+        "preview-remove": "Render the exact plan and digest for removing the FinishUP MCP server.",
+        "install": "Apply a previewed FinishUP MCP server registration.",
+        "status": "Report the FinishUP MCP server registration.",
+        "remove": "Apply a previewed FinishUP MCP server removal.",
+    }
+)
+
+for _mcp_action in _MCP_COMMAND_HELP:
+    integrate_mcp_app.command(_mcp_action, help=_MCP_COMMAND_HELP[_mcp_action])(
+        _integration_mcp_command(_mcp_action)
+    )
 
 
 def _cursor_project_mcp_command(action: str) -> Callable[..., None]:
@@ -3621,10 +3760,22 @@ def _cursor_project_mcp_command(action: str) -> Callable[..., None]:
     return command
 
 
-for _project_mcp_action in ("preview", "preview-remove", "install", "status", "remove"):
-    integrate_project_mcp_app.command(_project_mcp_action)(
-        _cursor_project_mcp_command(_project_mcp_action)
-    )
+_PROJECT_MCP_COMMAND_HELP: Final[Mapping[str, str]] = MappingProxyType(
+    {
+        "preview": "Render the exact plan and digest for Cursor's project MCP registration.",
+        "preview-remove": (
+            "Render the exact plan and digest for removing Cursor's project MCP registration."
+        ),
+        "install": "Apply a previewed Cursor project MCP registration.",
+        "status": "Report Cursor's project MCP registration.",
+        "remove": "Apply a previewed Cursor project MCP removal.",
+    }
+)
+
+for _project_mcp_action in _PROJECT_MCP_COMMAND_HELP:
+    integrate_project_mcp_app.command(
+        _project_mcp_action, help=_PROJECT_MCP_COMMAND_HELP[_project_mcp_action]
+    )(_cursor_project_mcp_command(_project_mcp_action))
 
 
 # The per-host plugin command surface (issue #465). Codex activation is the
@@ -4013,8 +4164,19 @@ def _host_admission_command(command_name: str) -> Callable[..., None]:
     return command
 
 
-for _admission_action in ("status", "preview", "grant", "revoke"):
-    integrate_admission_app.command(_admission_action)(_host_admission_command(_admission_action))
+_ADMISSION_COMMAND_HELP: Final[Mapping[str, str]] = MappingProxyType(
+    {
+        "status": "Report this project's host admission entry for the AI-powered check.",
+        "preview": "Render the exact plan and digest for granting or revoking host admission.",
+        "grant": "Apply a previewed host admission grant for the AI-powered check.",
+        "revoke": "Remove exactly the host admission entry FinishUP wrote.",
+    }
+)
+
+for _admission_action in _ADMISSION_COMMAND_HELP:
+    integrate_admission_app.command(
+        _admission_action, help=_ADMISSION_COMMAND_HELP[_admission_action]
+    )(_host_admission_command(_admission_action))
 
 
 def _setup_targets(
@@ -4394,7 +4556,10 @@ def _unlock_operation(name: str) -> Callable[[], Awaitable[object]]:
     return cast(Callable[[], Awaitable[object]], getattr(module, name))
 
 
-@service_app.command("unlock")
+@service_app.command(
+    "unlock",
+    help="Unlock the vault of the running service.",
+)
 def service_unlock(json_output: _JSON = False) -> None:
     _finish(run_async(lambda: _service_unlock(json_output)))
 
@@ -4407,7 +4572,7 @@ async def _service_unlock(json_output: bool) -> int:
         finally:
             await client.close()
     except ControlError as error:
-        return _control_failure(error)
+        return _control_failure(error, json_output=json_output)
     if status.vault_mode == "os_keyring":
         return await _unlock_call(_unlock_operation("retry_keyring"), json_output)
     if status.vault_mode == "passphrase":
@@ -4605,7 +4770,7 @@ async def _service_auto_unlock_repair(json_output: bool) -> int:
         finally:
             await client.close()
     except ControlError as error:
-        return _control_failure(error)
+        return _control_failure(error, json_output=json_output)
     if status.vault_mode == "uninitialized":
         # An orphan left by a failed initialization attempt (#511) is removed with verified
         # read-back, but only under the bundle-scoped guard with the vault state re-proven
@@ -4623,7 +4788,7 @@ async def _service_auto_unlock_repair(json_output: bool) -> int:
                         finally:
                             await client.close()
                     except ControlError as error:
-                        return _control_failure(error)
+                        return _control_failure(error, json_output=json_output)
                     if proven.state.value != "locked" or proven.vault_mode != "uninitialized":
                         _stderr(
                             "auto_unlock_repair_unproven: the vault state changed; rerun "
@@ -4986,7 +5151,10 @@ async def _service_recovery_restore(json_output: bool) -> int:
     return await _trusted_call(lambda: operation(target), json_output)
 
 
-@service_app.command("initialize-passphrase")
+@service_app.command(
+    "initialize-passphrase",
+    help="Initialize a passphrase-protected vault from this terminal.",
+)
 def service_initialize_passphrase(json_output: _JSON = False) -> None:
     _finish(
         run_async(
@@ -5015,7 +5183,10 @@ def _idle_relock_target(raw: str) -> int | str:
     return value
 
 
-@service_app.command("idle-relock")
+@service_app.command(
+    "idle-relock",
+    help="Set how many idle seconds pass before the vault relocks, or disable idle relock.",
+)
 def service_idle_relock(
     target: Annotated[str, typer.Argument(help="60..86400 or disabled.")],
     json_output: _JSON = False,
@@ -5165,8 +5336,14 @@ def run_configured_provider_credential(action: Literal["set", "rotate"]) -> None
     _provider_credential_command(action)()
 
 
-credential_app.command("set")(_provider_credential_command("set"))
-credential_app.command("rotate")(_provider_credential_command("rotate"))
+credential_app.command(
+    "set",
+    help="Store a provider API key in the encrypted vault, entered with hidden terminal input.",
+)(_provider_credential_command("set"))
+credential_app.command(
+    "rotate",
+    help="Replace a stored provider API key, entered with hidden terminal input.",
+)(_provider_credential_command("rotate"))
 register_credential_remove(credential_app)
 
 
@@ -5921,7 +6098,10 @@ def privacy_export_desired(
 
     async def _run() -> int:
         from finishup.adapters.privacy.catalog import decode_privacy_policy_canonical
-        from finishup.config.privacy_desired import write_privacy_desired_toml
+        from finishup.config.privacy_desired import (
+            PrivacyDesiredOutputUnwritable,
+            write_privacy_desired_toml,
+        )
 
         # Machine scope is a local construction; resolve it before connecting so a broken
         # installation marker stops here without any service request (issue #517).
@@ -5935,7 +6115,7 @@ def privacy_export_desired(
             finally:
                 await client.close()
         except ControlError as error:
-            return _control_failure(error)
+            return _control_failure(error, json_output=json_output)
         plain = _plain_json(effective)
         if type(plain) is not dict or "policy" not in plain:
             return _usage_failure()
@@ -5945,7 +6125,13 @@ def privacy_export_desired(
             )
         except Exception:
             return _usage_failure()
-        path = write_privacy_desired_toml(policy, output)
+        try:
+            path = write_privacy_desired_toml(policy, output)
+        except PrivacyDesiredOutputUnwritable as error:
+            # A path the caller chose that cannot be written is a named refusal with its remedy,
+            # never an internal error; neither the path nor the OS message is echoed.
+            _stderr(f"{error.reason_code}: {error.remedy}")
+            return 2
         _human_or_json(
             # Frozen legacy identifier (ADR-048): machine-readable report tag agents parse.
             {"path": str(path), "schema": "yoetz.privacy-desired/1"},
@@ -5986,7 +6172,7 @@ def privacy_apply_desired(
             finally:
                 await client.close()
         except ControlError as error:
-            return _control_failure(error)
+            return _control_failure(error, json_output=json_output)
         plain = _plain_json(effective)
         if type(plain) is not dict or "policy" not in plain:
             return _usage_failure()
@@ -6076,8 +6262,14 @@ def _privacy_decision_command(kind: str) -> Callable[..., None]:
     return command
 
 
-privacy_app.command("decide-policy")(_privacy_decision_command("policy"))
-privacy_app.command("decide-disclosure")(_privacy_decision_command("disclosure"))
+privacy_app.command(
+    "decide-policy",
+    help="Approve or deny one exact pending policy proposal on the terminal.",
+)(_privacy_decision_command("policy"))
+privacy_app.command(
+    "decide-disclosure",
+    help="Decide one exact pending disclosure by id.",
+)(_privacy_decision_command("disclosure"))
 
 
 async def _privacy_pending(json_output: bool) -> int:
@@ -6090,7 +6282,7 @@ async def _privacy_pending(json_output: bool) -> int:
     except (ProtocolValueError, ValueError):
         return _usage_failure()
     except ControlError as error:
-        return _control_failure(error)
+        return _control_failure(error, json_output=json_output)
     if json_output:
         _human_or_json(result, json_output=True)
         return 0
@@ -6233,7 +6425,10 @@ async def _privacy_receipts_list(page_size: int, cursor: str | None, json_output
     return 0
 
 
-@privacy_receipts_app.command("list")
+@privacy_receipts_app.command(
+    "list",
+    help="Page through the receipts of what FinishUP showed locally and sent off the machine.",
+)
 def privacy_receipts_list(
     page_size: Annotated[int, typer.Option("--page-size", min=1, max=100)] = 50,
     cursor: Annotated[str | None, typer.Option("--cursor")] = None,
@@ -6263,7 +6458,10 @@ async def _privacy_receipts_get(receipt_id: str, json_output: bool) -> int:
     return 0
 
 
-@privacy_receipts_app.command("get")
+@privacy_receipts_app.command(
+    "get",
+    help="Show one privacy receipt by its id.",
+)
 def privacy_receipts_get(
     receipt_id: Annotated[str, typer.Argument(help="Exact privacy receipt ID.")],
     json_output: _JSON = False,

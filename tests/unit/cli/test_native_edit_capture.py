@@ -418,6 +418,25 @@ def test_cursor_after_file_edit_body_is_captured_with_relative_path(tmp_path: Pa
     assert b"{user}" not in content
 
 
+def test_cursor_after_file_edit_under_a_differently_folded_root_is_never_mis_sliced(
+    tmp_path: Path,
+) -> None:
+    # Full Unicode case folding turns "ß" into "ss", so a slice at the folded root's length
+    # would cut into the path; NTFS keeps "Straße" and "STRASSE" as different names.
+    workspace = "/mnt/c/Users/{user}/STRASSE"
+    payload = _cursor(
+        "afterFileEdit",
+        workspace,
+        file_path="C:\\Users\\{user}\\Straße\\src\\module.py",
+        edits=[{"old_string": "validate(request)", "new_string": "planted_bug(request)"}],
+    )
+    content = dict(_chunks("PostToolUse", payload, tmp_path, source=_CURSOR, workspace=workspace))[
+        ObservationContentKind.CHANGED_FILE
+    ]
+    assert b'"path":"<outside-workspace>"' in content and b"planted_bug" in content
+    assert b"{user}" not in content and "Straße".encode() not in content
+
+
 # --- Path privacy matrix ------------------------------------------------------------------
 
 
@@ -443,6 +462,14 @@ def test_cursor_after_file_edit_body_is_captured_with_relative_path(tmp_path: Pa
         ("/mnt/c/Users/{user}/proj", "D:\\Users\\{user}\\proj\\a.py", None),
         ("/mnt/c/Users/{user}/proj", "C:relative.py", None),
         ("C:\\Users\\{user}\\proj", "/mnt/c/Users/{user}/proj/src/a.py", "src/a.py"),
+        # Case-insensitive keys fold character by character, so a fold that changes length
+        # ("ß" to "ss", "İ" to "i̇", a ligature) never matches and never shifts the slice.
+        ("/mnt/c/Users/{user}/STRASSE", "C:\\Users\\{user}\\Straße\\src\\x.py", None),
+        ("/mnt/c/Users/{user}/Straße", "C:\\Users\\{user}\\STRASSE\\src\\x.py", None),
+        ("/mnt/c/Users/{user}/Straße", "c:/users/{USER}/straße/src/x.py", "src/x.py"),
+        ("/mnt/c/Users/{user}/İzmir", "/mnt/c/Users/{user}/i̇zmir/src/x.py", None),
+        ("/mnt/c/Users/{user}/office", "/mnt/c/Users/{user}/oﬃce/src/x.py", None),
+        ("//server/share/ÄRGER", "\\\\server\\share\\ärger\\src\\x.py", "src/x.py"),
         # UNC shares (for example \\wsl$ or a network workspace).
         ("//server/share/proj", "\\\\server\\share\\proj\\src\\a.py", "src/a.py"),
         ("//server/share/proj", "\\\\other\\share\\proj\\a.py", None),
@@ -581,6 +608,39 @@ def test_codex_shell_apply_patch_heredoc_is_captured_from_its_only_hook(
     assert ObservationContentKind.WORKSPACE_DIFF not in post
 
 
+@pytest.mark.parametrize(
+    ("opener", "delimiter"), [("<<\\EOF", "EOF"), ("<<'END-PATCH'", "END-PATCH")]
+)
+def test_codex_shell_apply_patch_heredoc_with_any_bash_delimiter_is_captured(
+    opener: str, delimiter: str, tmp_path: Path
+) -> None:
+    """Bash reads ``<<\\EOF`` and ``<<'END-PATCH'`` as heredocs, so Codex's intercepted patch is
+    still captured from its only hook and not again from a post event."""
+
+    workspace = _WORKSPACES[sorted(_WORKSPACES)[0]]
+    command = f"apply_patch {opener}\n" + _patch(f"{workspace}/app/module.py") + delimiter
+    pre = dict(
+        _chunks(
+            "PreToolUse",
+            _codex_bash("PreToolUse", workspace, command),
+            tmp_path / "pre",
+            source=_CODEX,
+            workspace=workspace,
+        )
+    )
+    assert b"*** Update File: app/module.py\n" in pre[ObservationContentKind.WORKSPACE_DIFF]
+    post = dict(
+        _chunks(
+            "PostToolUse",
+            _codex_bash("PostToolUse", workspace, command),
+            tmp_path / "post",
+            source=_CODEX,
+            workspace=workspace,
+        )
+    )
+    assert ObservationContentKind.WORKSPACE_DIFF not in post
+
+
 @pytest.mark.parametrize("os_name", sorted(_WORKSPACES))
 def test_codex_exec_command_heredoc_write_is_captured_and_scratch_files_skipped(
     os_name: str, tmp_path: Path
@@ -637,6 +697,58 @@ def test_claude_and_cursor_shell_heredoc_edits_are_captured(
     write = post[ObservationContentKind.CHANGED_FILE]
     assert b'"path":"app/notes.md"' in write and b"planted note" in write
     assert b"{user}" not in diff + write
+
+
+@pytest.mark.parametrize(
+    ("source", "tool", "event"),
+    [
+        (_CLAUDE, "Bash", "PostToolUse"),
+        (_CURSOR, "Shell", "postToolUse"),
+        (_CODEX, "Bash", "PostToolUse"),
+    ],
+)
+@pytest.mark.parametrize("closing", ["EOF \n", "  EOF\n"])
+def test_a_heredoc_patch_bash_does_not_close_is_still_captured(
+    source: ObservationSource, tool: str, event: str, closing: str, tmp_path: Path
+) -> None:
+    """A closing line bash does not accept (a trailing blank, an indent without ``<<-``) leaves
+    the heredoc open to the end of the script, and ``git apply`` still applies what it is fed:
+    the patch is the edit, so its bytes are captured as they are for a closed heredoc."""
+
+    workspace = _WORKSPACES["linux"]
+    command = (
+        "git apply <<'EOF'\n"
+        f"--- {workspace}/app/module.py\n"
+        f"+++ {workspace}/app/module.py\n"
+        "@@ -1 +1 @@\n"
+        "-    return validate(request)\n"
+        "+    return planted_bug(request)\n"
+        f"{closing}"
+    )
+
+    def post(shell_command: str, state: Path) -> dict[ObservationContentKind, bytes]:
+        payload: dict[str, JsonValue] = (
+            _codex_bash("PostToolUse", workspace, shell_command)
+            if source is _CODEX
+            else {
+                "hook_event_name": event,
+                "tool_name": tool,
+                "tool_use_id": "shell-padded-close",
+                "cwd": workspace,
+                "tool_input": {"command": shell_command},
+                "tool_response": {"stdout": "", "stderr": "", "interrupted": False},
+            }
+        )
+        return dict(_chunks("PostToolUse", payload, state, source=source, workspace=workspace))
+
+    diff = post(command, tmp_path / "patch")[ObservationContentKind.WORKSPACE_DIFF]
+    assert b"# yoetz edit source: shell\n" in diff
+    assert b"--- app/module.py\n+++ app/module.py\n" in diff and b"planted_bug" in diff
+    assert b"{user}" not in diff
+    # A ``<<`` that feeds no patch tool may be a shift, not a heredoc: the rest of the command is
+    # not captured as a file's content.
+    shift = post('cat <<< "$((1<<3))" > app/size.txt\n3 \n', tmp_path / "shift")
+    assert ObservationContentKind.CHANGED_FILE not in shift
 
 
 def test_script_mediated_edits_carry_no_reviewable_bytes(tmp_path: Path) -> None:

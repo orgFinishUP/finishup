@@ -10,32 +10,13 @@ from collections.abc import Mapping, Sequence
 from typing import cast
 
 from finishup.adapters.providers.reviewer_reply import ReviewerReplyInvalid, decode_reviewer_reply
-from finishup.domain.reviewer_reads import MAX_REVIEWER_READ_ATTEMPTS
+from finishup.domain.reviewer_reads import MAX_REVIEWER_READ_ATTEMPTS, REVIEWER_READ_REASONS
 from finishup.ports.ledger import SemanticAttemptRecord
 from finishup.ports.objects import ObjectKind, ObjectStorePort
 from finishup.ports.semantic import SemanticJudgment
 from finishup.protocol.canonical import JsonValue, strict_json_parse
 
 _FIELDS = frozenset({"call", "action", "args", "status", "reason"})
-_REASONS = frozenset(
-    {
-        "forbidden_path",
-        "outside_scope",
-        "not_recorded",
-        "unsupported_type",
-        "invalid_request",
-        "source_changed",
-        "not_in_frozen_case",
-        "not_retained",
-        "byte_budget",
-        "inspection_limit",
-        "native_read_limit",
-        "privacy_withheld",
-        "authorization_changed",
-        "outcome_unknown",
-        "deadline",
-    }
-)
 
 
 def read_usage_from_wire(value: object) -> tuple[Mapping[str, JsonValue], ...] | None:
@@ -55,7 +36,9 @@ def read_usage_from_wire(value: object) -> tuple[Mapping[str, JsonValue], ...] |
         if row["status"] not in ("ok", "partial", "unavailable", "denied", "stale"):
             return None
         reason = row["reason"]
-        if reason is not None and (not isinstance(reason, str) or reason not in _REASONS):
+        if reason is not None and (
+            not isinstance(reason, str) or reason not in REVIEWER_READ_REASONS
+        ):
             return None
         try:
             action = decode_reviewer_reply(

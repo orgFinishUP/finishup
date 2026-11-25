@@ -392,13 +392,19 @@ def _timestamp() -> str:
 
 
 def _parse_timestamp(value: str) -> datetime | None:
-    """Return the recorded moment, or None when the row's stamp is unreadable."""
+    """Return the recorded moment in UTC, or None when the row's stamp is unreadable.
+
+    The file is mutable local input: a stamp that parses but has no representable UTC moment
+    (``0001-01-01T00:00:00+01:00``) is as undatable as one that does not parse.
+    """
 
     try:
         parsed = datetime.fromisoformat(value)
-    except ValueError:
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=UTC)
+        return parsed.astimezone(UTC)
+    except (ValueError, OverflowError):
         return None
-    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
 
 
 def record_hook_diagnostic(
@@ -881,7 +887,9 @@ def _read_rows(
             for line in raw.splitlines():
                 try:
                     parsed: object = json.loads(line)
-                except (UnicodeError, json.JSONDecodeError):
+                except (UnicodeError, json.JSONDecodeError, RecursionError):
+                    # A row nested deeper than the decoder recurses is skipped like any
+                    # other malformed row rather than failing the whole status read.
                     continue
                 if type(parsed) is not dict:
                     continue

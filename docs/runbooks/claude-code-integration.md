@@ -13,10 +13,14 @@ shared behavior on macOS, Linux and WSL 2, without claiming new native acceptanc
 [the reviewer contract](../INTERFACES.md#reviewer-loop-issue-1118-unit-2).
 
 Per-exchange prompt-cache telemetry (#1172) applies to Claude Code through the same service:
-each reviewer exchange that reports usage writes one content-free `exchange_cache` owner
-diagnostic, read with `finishup service diagnostics --request-id`. It depends on the review
+each reviewer exchange the provider answers writes one content-free `exchange_cache` owner
+diagnostic, with its token counts or whether its usage was unreported or refused, read with
+`finishup service diagnostics --request-id`. It depends on the review
 provider, not the agent host, adds no request or egress, and never changes a review outcome.
 See [the exchange contract](../INTERFACES.md#reviewer-completion-exchanges-issue-1118-unit-3-adr-006).
+`finishup service diagnostics --reviewer-cache` sums those records per review and in total; it is an
+owner-only CLI report, not offered over MCP tools, hook events or the terminal interface on any
+host (ADR-006, 2026-11-21 amendment).
 The reviewer also keeps its reply schema through a review's normal final turn and announces that
 turn with a short appended notice, so the provider can reuse the conversation from its cache. Only
 the final-phase repair turn, or a final turn after the review's one repair is spent, changes the
@@ -63,8 +67,9 @@ The existing OS-authenticated artifact review still applies. The plan also lists
 project has no active observation consent; without it the hooks record nothing and deliver no
 startup cue (`workspace_unconsented`). It is the same step Codex setup carries, and disconnect keeps
 the consent (`finishup observe revoke` withdraws it) (#1279). Setup reads Claude Code's own
-`.claude.json` (up to 32 MiB) for ownership even though Claude writes decimal values into it; only
-its MCP tables are used, and FinishUP never writes that file (#1278). Status and disconnect use
+`.claude.json` (up to 32 MiB) for ownership even though Claude writes decimal values into it, or
+text whose escapes decode to a NUL or a lone surrogate (a truncated emoji); only its MCP tables are
+used, and FinishUP never writes that file (#1278, #1389). Status and disconnect use
 `finishup setup status|disconnect --host claude` with the same target options. Standalone `plugin
 install` below retains its disabled-by-default behavior.
 
@@ -892,6 +897,9 @@ Select these hooks with `--observation-profile ordinary` on the existing Claude 
 preview/install/update/status commands, or on `finishup integrate claude plugin export` for a
 development directory. Repeat the same profile when applying an exact preview. To return to
 scoped structural hooks, preview and apply an update with `--observation-profile structural`.
+`finishup connect` keeps the profile of a marker-verified installed source: re-running it after
+an upgrade, or connecting another project that shares the config root's source, never reverts
+ordinary hooks to structural ones. A new installation starts structural.
 Artifact selection does not grant content capture.
 Preview names the selected profile. Status reports the requested profile and confirms an installed
 profile only when its verified marker and artifact digest match; otherwise that installed value is
@@ -1603,6 +1611,11 @@ finishup integrate claude admission preview --project-root "$PROJECT_ROOT" \
 finishup integrate claude admission grant --project-root "$PROJECT_ROOT" ... --accept --preview-digest <digest>
 ```
 
+The preview's `next_command` is that apply step with the same selectors in path-free placeholder
+form (`--claude-path <claude-path>` and the other roots, a non-default `--mcp-ownership` or
+`--route-profile`, and `--checkpoint` when the preview used it, for a revoke too); fill in the
+placeholders and run it. The digest covers the checkpoint choice, so applying a `--checkpoint`
+preview without it refuses with `host_admission_preview_stale` and writes nothing.
 The Claude roots are what the route observation needs (`status` on the plugin); without them
 the route is unread and a grant refuses with `host_admission_route_unobserved`. A strict route
 refuses with `route_not_policy`; a grant that does not permit review with
@@ -1701,7 +1714,9 @@ foreign marketplaces/MCP entries, modified sources, and orphaned caches. A lost/
 is `outcome_unknown` — as is any post-mutation state the read-back cannot confirm, even on exit 0;
 run status and reconcile rather than guessing rollback. Replacement and removal revalidate the
 displaced tree after renaming it out of the public path and destroy only a marker-valid managed
-tree; interrupted stage/rollback material surfaces in status as `recovery_required`.
+tree; interrupted stage/rollback material surfaces in status as `recovery_required`. A file added
+inside the marketplace source makes it `modified` whatever its name (non-ASCII UTF-8 names included,
+#1386); a name that is not valid UTF-8 is refused `target_unsafe`.
 
 ## Proof checklist
 
@@ -2242,7 +2257,8 @@ home-relative or drive-relative locator, or any `..` path is replaced by `<outsi
 dropped. The rule is lexical and identical on macOS, Linux and Windows through WSL 2: POSIX
 (`/home/<user>/...`, `/Users/<user>/...`), Windows drive (`C:\...`), UNC (`\\server\share\...`) and WSL
 mount (`/mnt/c/...`) spellings are compared, with drive, mount and UNC forms matched
-case-insensitively, and no filesystem lookup is made. Edits use the ordinary capture caps (at most
+case-insensitively one character at a time, as NTFS does (`ß` never matches `SS`), and no
+filesystem lookup is made. Edits use the ordinary capture caps (at most
 16 chunks and about 680 KB per event), not the routine-output budgets, and remain subject to the
 existing capture consent, secret scanning and outbox admission.
 

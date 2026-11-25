@@ -124,7 +124,7 @@ class HookSpool:
                 path = draining if draining.exists() else pending
                 descriptor = os.open(
                     path,
-                    os.O_WRONLY
+                    os.O_RDWR
                     | os.O_APPEND
                     | os.O_CREAT
                     | getattr(os, "O_CLOEXEC", 0)
@@ -133,6 +133,12 @@ class HookSpool:
                 )
                 try:
                     os.fchmod(descriptor, 0o600)
+                    size = os.fstat(descriptor).st_size
+                    if size > 0 and os.pread(descriptor, 1, size - 1) != b"\n":
+                        # A short write before a failure, or a hook killed mid-write, left a
+                        # partial line. End it here so the reader discards only that fragment
+                        # instead of gluing this acknowledged record onto it.
+                        line = b"\n" + line
                     written = 0
                     while written < len(line):
                         written += os.write(descriptor, line[written:])

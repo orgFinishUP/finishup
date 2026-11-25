@@ -24,7 +24,10 @@ from finishup.protocol.canonical import (
 )
 from finishup.protocol.coverage import PublicationChannel
 from finishup.protocol.ids import IdKind, validate_id
-from finishup.protocol.models import MAX_REVIEW_EXCERPTS, DataCategory
+from finishup.protocol.model_values import (
+    MAX_REVIEW_EXCERPTS,
+    DataCategory,
+)
 from finishup.protocol.redacted_values import (
     SemanticRedactedValue,
     validate_semantic_redacted_values,
@@ -1293,7 +1296,8 @@ class PrivacyPolicy:
     def meet(self, other: PrivacyPolicy) -> PrivacyPolicy:
         """Intersect two standing policies (ADR-009 decision 6 / protocol policy resolution).
 
-        Permission fields tighten by meet (AND / set intersection / min ceilings). Identity
+        Permission fields tighten by meet (AND / set intersection / min ceilings); the
+        current-data-use guard is ORed but dropped when no inference binding survives. Identity
         (``policy_id``, ``version``, ``created_at``, ``effective_scope``) is taken from the
         more-specific scope when ranks differ, else from ``self``. The result's
         ``policy_digest`` is recomputed from the meet body so multi-scope composition is not
@@ -1391,6 +1395,13 @@ class PrivacyPolicy:
         if local_binding is None:
             local_enabled = False
 
+        # The guard gates the inference destination; when the meet leaves none, nothing remains
+        # for it to gate, so dropping it tightens (a value the constructor would otherwise refuse).
+        require_evidence = (
+            self.require_current_provider_data_use_evidence
+            or other.require_current_provider_data_use_evidence
+        ) and llm.provider_binding is not None
+
         identity = (
             other
             if _SCOPE_KIND_RANK[other.effective_scope.kind]
@@ -1404,8 +1415,7 @@ class PrivacyPolicy:
             profile,
             review_context,
             review_selection,
-            self.require_current_provider_data_use_evidence
-            or other.require_current_provider_data_use_evidence,
+            require_evidence,
             network,
             identity.effective_scope,
             channels,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 from dataclasses import replace
@@ -54,6 +55,7 @@ from finishup.domain.observation import (
 )
 from finishup.domain.observation_budget import AdmissionLossCause, ObservationMode
 from finishup.domain.values import JsonObject, Timestamp
+from finishup.protocol.errors import PublicErrorCode, PublicOperationError
 
 
 def test_source_file_identity_bounds_large_filesystem_integers() -> None:
@@ -533,6 +535,83 @@ def test_reconcile_does_not_advance_past_a_rejected_envelope(
     assert cursor.byte_position == 0
     assert cursor.event_position == 0
     assert store.pending_outbox_count(workspace) == 0
+
+
+def test_reconcile_fails_as_storage_when_another_workspace_cannot_be_read_then_retries(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A transient read failure of another workspace's state is named, and the pass retries.
+
+    Each stream row is ingested by session, which scans every workspace document. When one
+    of the others cannot be read, the pass must fail with the retryable storage error. It
+    must not treat the row as rejected for missing consent: that kept the cursor in place,
+    recorded a completed pass, and never named the cause.
+    """
+
+    home = tmp_path / "codex-home"
+    sessions = home / "sessions"
+    sessions.mkdir(parents=True)
+    session_id = "stream-other-workspace-unreadable"
+    target = sessions / f"rollout-{session_id}.jsonl"
+    target.write_bytes(failed_shell_rollout())
+    seed = LocalObservationStore(_state=tmp_path)
+    workspace = seed.workspace_commitment(str(tmp_path.resolve()))
+    seed.grant_consent(workspace)
+    session = seed.session_commitment(session_id)
+    seed.bind_session(workspace, session)
+    (tmp_path / "other").mkdir()
+    other = seed.workspace_commitment(str(tmp_path / "other"))
+    seed.grant_consent(other)
+    other_path = (
+        tmp_path / "observation" / "workspaces" / (other.removeprefix("hmac-sha256:") + ".json")
+    )
+    real_open = os.open
+
+    def failing_open(
+        path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        if os.fspath(path) == os.fspath(other_path):
+            raise OSError(errno.EIO, os.strerror(errno.EIO))
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+
+    # A new store, as each hook process has: nothing is cached, so the scan reads the file.
+    store = LocalObservationStore(_state=tmp_path)
+    with monkeypatch.context() as failing:
+        failing.setattr(os, "open", failing_open)
+        with pytest.raises(PublicOperationError) as failure:
+            reconcile_session_stream(
+                store,
+                workspace_commitment=workspace,
+                session_commitment=session,
+                codex_session_id=session_id,
+                locator=CodexSessionStreamLocator(home),
+            )
+    assert failure.value.code is PublicErrorCode.STORAGE_UNSAFE
+    assert failure.value.retryable is True
+    # Nothing of the failed pass is durable: no cursor, no row, and no reconcile stamp that
+    # would let the next hook skip its pass as recently done.
+    after = LocalObservationStore(_state=tmp_path)
+    assert after.get_stream_cursor(workspace, session) is None
+    assert after.pending_outbox_count(workspace) == 0
+    assert after.last_stream_reconcile_mono(workspace) is None
+
+    result = reconcile_session_stream(
+        after,
+        workspace_commitment=workspace,
+        session_commitment=session,
+        codex_session_id=session_id,
+        locator=CodexSessionStreamLocator(home),
+    )
+
+    accepted = result["accepted"]
+    assert isinstance(accepted, int) and accepted >= 1
+    assert result["byte_position"] == target.stat().st_size
+    assert after.pending_outbox_count(workspace) == accepted
 
 
 @pytest.mark.parametrize("blocked_by", ["ingest", "outbox"])
@@ -1369,7 +1448,7 @@ def test_completed_masking_compound_command_preserves_outer_zero_with_nested_gap
     assert ObservationGapCode.COMPOUND_OUTCOME_UNAVAILABLE.value in envelope.gap_codes
 
 
-def _rollout_command_envelope(command: str) -> ObservationEnvelope:
+def _rollout_command_envelope(command: str | list[str]) -> ObservationEnvelope:
     record = CodexParsedRecord(
         1,
         0,
@@ -1423,6 +1502,44 @@ def test_a_rollout_command_that_writes_carries_the_hooks_closed_write_scope(
     command: str, scope: str | None
 ) -> None:
     assert _rollout_command_envelope(command).structural_payload.get("write_scope") == scope
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "bash -n run_tests.sh",
+        ["bash", "-n", "run_tests.sh"],
+        ["bash", "-nc", "./run_tests.sh"],
+        ["/bin/bash", "-lc", "bash -n run_tests.sh"],
+    ],
+)
+def test_a_rollout_noexec_shell_call_is_not_recorded_as_a_test_run(
+    command: str | list[str],
+) -> None:
+    """A shell given noexec ran nothing, as a string and as the argv Codex records (#1444)."""
+
+    assert _rollout_command_envelope(command).structural_payload["runner_class"] == "other"
+
+
+@pytest.mark.parametrize(
+    ("command", "gap"),
+    [
+        ("fish -c 'pytest -q; true'", True),
+        (["fish", "-c", "pytest -q; true"], True),
+        (["script", "-qec", "pytest -q; true", "/dev/null"], True),
+        (["git", "rebase", "-x", "pytest -q || true", "main"], True),
+        # A message is data to ``git commit``, in the argv form as in the string form (#1447).
+        (["git", "commit", "-m", "a; b"], False),
+        ("git commit -m 'a; b'", False),
+    ],
+)
+def test_a_rollout_command_with_quoted_text_another_program_may_run_keeps_the_nested_gap(
+    command: str | list[str], gap: bool
+) -> None:
+    """An argv word holding a separator is quoted text: only a data program makes it data."""
+
+    codes = _rollout_command_envelope(command).gap_codes
+    assert (ObservationGapCode.COMPOUND_OUTCOME_UNAVAILABLE.value in codes) is gap
 
 
 @pytest.mark.parametrize("vector", VECTORS, ids=[f"{n:03d}" for n, _ in enumerate(VECTORS)])
@@ -3114,6 +3231,22 @@ def test_rollout_item_decisions_never_change_once_made() -> None:
     # A stated post with a different exit is not this item's copy; it stays pending.
     other = _decide_row(4, hook=True, identity="post-b", call_id="call-b", exit_status=1)
     assert _decisions(early, copy, pending, other)["item-b"] == "pending"
+
+
+def test_rollout_item_paired_by_call_id_consumes_its_posts_stated_exit() -> None:
+    """#910: a stated post has one copy, whichever order its own item and it arrive in."""
+
+    post_a = _decide_row(1, hook=True, identity="post-a", call_id="call-a", exit_status=0)
+    item_a = _decide_row(2, hook=False, identity="item-a", call_id="call-a", exit_status=0)
+    post_b = _decide_row(3, hook=True, identity="post-b", call_id="call-b")
+    item_b = _decide_row(4, hook=False, identity="item-b", call_id="exec-b", exit_status=0)
+    expected = {"item-a": "copy", "item-b": "carrier"}
+    for a_rows in ((post_a, item_a), (item_a, post_a)):
+        for b_rows in ((post_b, item_b), (item_b, post_b)):
+            assert _decisions(*a_rows, *b_rows) == expected
+    # A duplicate item of the already-paired call is still that call's copy.
+    again = _decide_row(5, hook=False, identity="item-a2", call_id="call-a", exit_status=0)
+    assert _decisions(post_a, item_a, again, post_b, item_b) == {**expected, "item-a2": "copy"}
 
 
 def test_pending_rollout_items_persist_until_settled(tmp_path: Path) -> None:

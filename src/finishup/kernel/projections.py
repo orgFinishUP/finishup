@@ -74,8 +74,10 @@ from finishup.domain.values import (
     JsonValue as DomainJsonValue,
 )
 from finishup.protocol.canonical import (
+    CanonicalFragment,
     JsonValue,
     canonical_digest,
+    canonical_fragment,
     canonical_integer_string,
     parse_canonical_integer_string,
 )
@@ -102,6 +104,7 @@ __all__ = [
     "ObligationProjectionRecord",
     "PendingMissingForAssessment",
     "PlanProjectionRecord",
+    "ProjectionDigester",
     "ProjectionRecord",
     "ProjectionState",
     "ContentForgottenMarker",
@@ -1542,21 +1545,31 @@ def _plan_key(value: int) -> str:
     return canonical_integer_string(value)
 
 
+type _RecordValue = Callable[[_ProjectionRecordLike], JsonValue]
+
+
 def _sorted_record_map[K](
     source: Mapping[K, _ProjectionRecordLike],
     *,
     key_text: Callable[[K], str] = _string_key,
+    record_value: _RecordValue = _record_snapshot,
 ) -> dict[str, JsonValue]:
     rows = sorted(
         ((key_text(key), record) for key, record in source.items()),
         key=lambda item: item[0].encode("ascii"),
     )
-    return {key: _record_snapshot(record) for key, record in rows}
+    return {key: record_value(record) for key, record in rows}
 
 
 def projection_snapshot(state: ProjectionState) -> dict[str, JsonValue]:
     """Return the exact canonical JSON-compatible generation-1 snapshot."""
 
+    return _projection_snapshot(state, _record_snapshot)
+
+
+def _projection_snapshot(
+    state: ProjectionState, record_value: _RecordValue
+) -> dict[str, JsonValue]:
     if type(state) is not ProjectionState:
         raise _invalid()
     contradictions = {
@@ -1579,32 +1592,43 @@ def projection_snapshot(state: ProjectionState) -> dict[str, JsonValue]:
         "plans": _sorted_record_map(
             cast(Mapping[int, _ProjectionRecordLike], state.plans),
             key_text=_plan_key,
+            record_value=record_value,
         ),
         "obligations": _sorted_record_map(
-            cast(Mapping[ObligationId, _ProjectionRecordLike], state.obligations)
+            cast(Mapping[ObligationId, _ProjectionRecordLike], state.obligations),
+            record_value=record_value,
         ),
         "decisions": _sorted_record_map(
-            cast(Mapping[EventId, _ProjectionRecordLike], state.decisions)
+            cast(Mapping[EventId, _ProjectionRecordLike], state.decisions),
+            record_value=record_value,
         ),
         "assignments": _sorted_record_map(
-            cast(Mapping[EventId, _ProjectionRecordLike], state.assignments)
+            cast(Mapping[EventId, _ProjectionRecordLike], state.assignments),
+            record_value=record_value,
         ),
         "actions": _sorted_record_map(
-            cast(Mapping[ActionId, _ProjectionRecordLike], state.actions)
+            cast(Mapping[ActionId, _ProjectionRecordLike], state.actions),
+            record_value=record_value,
         ),
         "results": _sorted_record_map(
-            cast(Mapping[ResultId, _ProjectionRecordLike], state.results)
+            cast(Mapping[ResultId, _ProjectionRecordLike], state.results),
+            record_value=record_value,
         ),
         "evidence": _sorted_record_map(
-            cast(Mapping[EvidenceId, _ProjectionRecordLike], state.evidence)
+            cast(Mapping[EvidenceId, _ProjectionRecordLike], state.evidence),
+            record_value=record_value,
         ),
-        "claims": _sorted_record_map(cast(Mapping[ClaimId, _ProjectionRecordLike], state.claims)),
+        "claims": _sorted_record_map(
+            cast(Mapping[ClaimId, _ProjectionRecordLike], state.claims), record_value=record_value
+        ),
         "contradictions": contradictions,
         "findings": _sorted_record_map(
-            cast(Mapping[FindingId, _ProjectionRecordLike], state.findings)
+            cast(Mapping[FindingId, _ProjectionRecordLike], state.findings),
+            record_value=record_value,
         ),
         "responses": _sorted_record_map(
-            cast(Mapping[FindingId, _ProjectionRecordLike], state.responses)
+            cast(Mapping[FindingId, _ProjectionRecordLike], state.responses),
+            record_value=record_value,
         ),
         "latest_tested_state": (
             None
@@ -1619,15 +1643,18 @@ def projection_snapshot(state: ProjectionState) -> dict[str, JsonValue]:
     # as the recipient ledger records one of the new event families.
     if state.coordination_contexts:
         snapshot["coordination_contexts"] = _sorted_record_map(
-            cast(Mapping[EventId, _ProjectionRecordLike], state.coordination_contexts)
+            cast(Mapping[EventId, _ProjectionRecordLike], state.coordination_contexts),
+            record_value=record_value,
         )
     if state.coordination_dispositions:
         snapshot["coordination_dispositions"] = _sorted_record_map(
-            cast(Mapping[EventId, _ProjectionRecordLike], state.coordination_dispositions)
+            cast(Mapping[EventId, _ProjectionRecordLike], state.coordination_dispositions),
+            record_value=record_value,
         )
     if state.coordination_declarations:
         snapshot["coordination_declarations"] = _sorted_record_map(
-            cast(Mapping[EventId, _ProjectionRecordLike], state.coordination_declarations)
+            cast(Mapping[EventId, _ProjectionRecordLike], state.coordination_declarations),
+            record_value=record_value,
         )
     if state.pending_missing_for_assessment is not None:
         pending = state.pending_missing_for_assessment
@@ -2279,3 +2306,51 @@ def projection_digest(state: ProjectionState) -> str:
     """Digest the exact canonical projection snapshot."""
 
     return canonical_digest(projection_snapshot(state))
+
+
+class ProjectionDigester:
+    """Digest one ledger's successive projections, re-encoding only records that changed.
+
+    Canonical encoding is compositional, so each projection record's canonical text can be spliced
+    into the snapshot as a :class:`CanonicalFragment`. Projection records are frozen and reach only
+    immutable values, so a record that is the *same object* as one digested last time has the same
+    text. Entries hold their record, so an ``id`` is never reused while cached; each call keeps only
+    the records of the projection it digested. That cache is not free: for as long as its ledger is
+    open it keeps every record's canonical text (close to the snapshot's own canonical text) plus
+    roughly 250-300 bytes of bookkeeping per record, measured at about 1.5 times the snapshot's
+    canonical text (2.15 MB for a 3,016-record ledger whose snapshot is 1.46 MB); a very small
+    ledger costs proportionally more (about 2 times at 11 records). The records add
+    almost nothing, as they are normally the ones the ledger's current projection already holds;
+    keying by ``id`` without holding the record would not be safe. ``digest`` returns exactly
+    :func:`projection_digest`; if the spliced path raises for any reason, the uncached path runs
+    instead, so a failure raises exactly what it always raised.
+    """
+
+    __slots__ = ("_fragments",)
+
+    def __init__(self) -> None:
+        self._fragments: dict[int, tuple[_ProjectionRecordLike, CanonicalFragment]] = {}
+
+    def digest(self, state: ProjectionState) -> str:
+        previous = self._fragments
+        current: dict[int, tuple[_ProjectionRecordLike, CanonicalFragment]] = {}
+
+        def record_value(record: _ProjectionRecordLike) -> JsonValue:
+            key = id(record)
+            hit = previous.get(key)
+            if hit is not None and hit[0] is record:
+                fragment = hit[1]
+            else:
+                fragment = canonical_fragment(_record_snapshot(record))
+            current[key] = (record, fragment)
+            return cast(JsonValue, fragment)
+
+        try:
+            digest = canonical_digest(_projection_snapshot(state, record_value))
+        except Exception:
+            digest = None
+        if digest is None:
+            # Outside the handler, so the uncached path's error carries no implicit context.
+            return projection_digest(state)
+        self._fragments = current
+        return digest

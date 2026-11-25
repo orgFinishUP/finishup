@@ -565,7 +565,7 @@ def _mcp_json(route_profile: Literal["strict", "policy"], *, legacy: bool = Fals
 def _inventory(members: Mapping[str, bytes]) -> tuple[ManagedPluginFile, ...]:
     return tuple(
         ManagedPluginFile(path, len(data), _sha(data))
-        for path, data in sorted(members.items(), key=lambda item: item[0].encode("ascii"))
+        for path, data in sorted(members.items(), key=lambda item: item[0].encode("utf-8"))
     )
 
 
@@ -768,7 +768,17 @@ def _plugin_parent(root: Path, *, create: bool) -> Path:
 
 def _safe_tree_files(root: Path) -> dict[str, bytes]:
     files: dict[str, bytes] = {}
-    for path in sorted(root.rglob("*"), key=lambda item: item.as_posix().encode("utf-8")):
+    # A name that is not valid UTF-8 (possible on Linux) cannot be named in a digest, so the
+    # tree is refused as unsafe rather than letting a codec error escape the closed reasons.
+    paths = sorted(
+        root.rglob("*"),
+        key=lambda item: item.as_posix().encode("utf-8", "surrogateescape"),
+    )
+    for path in paths:
+        try:
+            path.as_posix().encode("utf-8")
+        except UnicodeEncodeError:
+            raise _error(PluginArtifactReason.TARGET_UNSAFE) from None
         if path.is_symlink():
             raise _error(PluginArtifactReason.TARGET_UNSAFE)
         if path.is_dir():
@@ -787,7 +797,7 @@ def _tree_digest(files: Mapping[str, bytes]) -> str:
         {
             "files": [
                 {"relative_path": path, "sha256": _sha(data), "size": len(data)}
-                for path, data in sorted(files.items(), key=lambda item: item[0].encode("ascii"))
+                for path, data in sorted(files.items(), key=lambda item: item[0].encode("utf-8"))
             ]
         }
     )

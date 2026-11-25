@@ -10,6 +10,7 @@ from typing import Literal, cast
 
 import pytest
 
+from finishup.adapters.keys.encrypted_vault import EncryptedVaultStore
 from finishup.adapters.keys.installation_recovery import (
     InstallationRecoveryArtifact,
     InstallationRecoveryMode,
@@ -66,6 +67,7 @@ from finishup.service.confidential_protocol import (
 )
 from finishup.service.human_control import HumanControlError, HumanControlService
 from finishup.service.unlock import UnlockCoordinator, UnlockThrottleStore
+from finishup.service.vault import VaultMode, VaultService
 
 INSTALLATION_ID = "ins_20000000-0000-4000-8000-000000000001"
 SERVICE_ID = "svc_20000000-0000-4000-8000-000000000002"
@@ -1048,4 +1050,144 @@ async def test_provider_remove_reauthenticates_without_a_new_credential(
     assert len(effects.proofs) == 1
     if presence is not None:
         assert presence.attestation.used
+    memory.close()
+
+
+class _RealVaultClock:
+    def monotonic_seconds(self) -> float:
+        return 10.0
+
+    def now_utc(self) -> datetime:
+        raise AssertionError("wall clock forbidden")
+
+
+async def _ready_real_vault(tmp_path: Path, memory: LocalSecretMemory) -> VaultService:
+    tmp_path.mkdir(mode=0o700)
+    vault = VaultService(
+        installation_id="ins_00000000-0000-4000-8000-000000000001",
+        service_generation=7,
+        mode=VaultMode.UNINITIALIZED,
+        secret_memory=memory,
+        clock=_RealVaultClock(),  # pyright: ignore[reportArgumentType]
+        vault_store_factory=lambda: EncryptedVaultStore(tmp_path / "vault"),
+        pristine_state_digest="sha256:" + "1" * 64,
+    )
+    handle = memory.capture(SecretPurpose.VAULT_INITIALIZE, bytearray(b"correct horse battery"))
+    await vault.initialize_passphrase(handle, "sha256:" + "2" * 64)
+    assert vault.ready
+    return vault
+
+
+def _provider_target(action: Literal["set", "rotate"]) -> ProviderCredentialTarget:
+    purpose = "semantic-review"
+    return ProviderCredentialTarget(
+        action=action,
+        provider_id="openai",
+        model_id="gpt-5",
+        endpoint_profile_id="responses",
+        endpoint_profile_version="1",
+        purpose=purpose,
+        scope_digest=ZERO_DIGEST,
+        purpose_digest=canonical_digest({"purpose": purpose}),
+    )
+
+
+async def _submit_provider_credential(
+    tmp_path: Path,
+    memory: LocalSecretMemory,
+    vault: VaultService,
+    action: Literal["set", "rotate"],
+    credential: bytes,
+) -> tuple[HumanControlService, BaseException]:
+    from finishup.service import daemon as daemon_module
+
+    effects = daemon_module._LockedHumanEffects(  # pyright: ignore[reportPrivateUsage]
+        lifecycle=None,  # pyright: ignore[reportArgumentType]  # set/rotate never read it
+        vault=vault,
+        privacy_relay=daemon_module._PrivacyPolicyAppRelay(),  # pyright: ignore[reportPrivateUsage]
+    )
+    reauth = memory.capture(
+        SecretPurpose.PROVIDER_REAUTHENTICATION, bytearray(b"correct horse battery")
+    )
+    handle = memory.capture(SecretPurpose.PROVIDER_CREDENTIAL, bytearray(credential))
+    (tmp_path / "hc").mkdir(mode=0o700)
+    service, _, _, unlock_vault, _ = _service(
+        tmp_path / "hc",
+        mode="passphrase",
+        ready=True,
+        handles=[reauth, handle],
+        effects=effects,  # pyright: ignore[reportArgumentType]
+    )
+    # Mint the reauthentication proof for the vault generation the effects actually store into.
+    unlock_vault.generation = vault.generation
+    kind = (
+        HumanCeremonyKind.PROVIDER_CREDENTIAL_SET
+        if action == "set"
+        else HumanCeremonyKind.PROVIDER_CREDENTIAL_ROTATE
+    )
+    opened = await service.open_ceremony(
+        ClientOpenEnvelope("2" * 64, kind, _provider_target(action))
+    )
+    await service.submit_action(
+        ClientActionEnvelope(
+            opened.ceremony_id, 2, SelectAuthorizationSourceAction("secret_reauthentication")
+        )
+    )
+    credential_phase = await service.secret_completed(opened.ceremony_id)
+    assert type(credential_phase) is ServerPhaseEnvelope
+    with pytest.raises(Exception) as info:
+        await service.secret_completed(opened.ceremony_id)
+    return service, info.value
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "credential",
+    [b"sk-short", b"sk-" + b"a" * 20 + b"!"],
+    ids=["too_short", "not_token68"],
+)
+async def test_provider_credential_the_vault_refuses_is_rejected_and_frees_the_ceremony(
+    tmp_path: Path, credential: bytes
+) -> None:
+    from finishup.service.confidential_protocol import validate_provider_credential_buffer
+    from finishup.service.daemon import _human_error_code  # pyright: ignore[reportPrivateUsage]
+
+    # The transport guard accepts this key; only the vault's stricter rule refuses it.
+    validate_provider_credential_buffer(memoryview(bytearray(credential)))
+    memory = LocalSecretMemory()
+    vault = await _ready_real_vault(tmp_path / "vault-state", memory)
+    service, failure = await _submit_provider_credential(tmp_path, memory, vault, "set", credential)
+    assert type(failure) is HumanControlError
+    assert failure.reason == "secret_rejected"
+    assert _human_error_code(failure) == "secret_rejected"
+    # The failed ceremony released the one slot: a retry opens without ceremony_busy.
+    reopened = await service.open_ceremony(
+        ClientOpenEnvelope(
+            "4" * 64, HumanCeremonyKind.PROVIDER_CREDENTIAL_SET, _provider_target("set")
+        )
+    )
+    assert type(reopened.phase) is AuthorizationRequiredPhase
+    memory.close()
+
+
+@pytest.mark.anyio
+async def test_provider_credential_rotate_without_a_record_reports_record_missing(
+    tmp_path: Path,
+) -> None:
+    from finishup.service.daemon import _human_error_code  # pyright: ignore[reportPrivateUsage]
+
+    memory = LocalSecretMemory()
+    vault = await _ready_real_vault(tmp_path / "vault-state", memory)
+    service, failure = await _submit_provider_credential(
+        tmp_path, memory, vault, "rotate", b"sk-" + b"a" * 30
+    )
+    assert type(failure) is HumanControlError
+    assert failure.reason == "record_missing"
+    assert _human_error_code(failure) == "record_missing"
+    reopened = await service.open_ceremony(
+        ClientOpenEnvelope(
+            "4" * 64, HumanCeremonyKind.PROVIDER_CREDENTIAL_ROTATE, _provider_target("rotate")
+        )
+    )
+    assert type(reopened.phase) is AuthorizationRequiredPhase
     memory.close()

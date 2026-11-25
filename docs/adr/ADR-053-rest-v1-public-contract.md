@@ -237,7 +237,11 @@ The server keeps its keys in its own state, `<state dir>/rest/api-keys.json`
 (`yoetz.rest-api-keys/1`, owner-only canonical JSON, edited under an exclusive `flock` and renamed
 into place): per key its id (12 hex), the owner's label, its scope, its principal, when it was
 created, when it expires and when it was revoked, a random salt and `sha256(salt ‖ secret)`,
-compared in constant time. The key itself (`fuk_<id>_<secret>`) is never stored. At most 256 keys.
+compared in constant time. The key itself (`fuk_<id>_<secret>`) is never stored. At most 256
+unrevoked keys (an expired key counts until it is revoked; past that, `create` is
+`api_key_limit`), so revoking a key frees its slot. The file holds at most 256 records: `create` in a
+full file drops the oldest revoked record first, and that key then fails as `api_key_invalid`
+rather than `api_key_revoked`.
 Either edge re-reads the file when it changes: a revoked key fails its next request and its
 agents end.
 

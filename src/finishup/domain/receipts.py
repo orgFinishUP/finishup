@@ -81,7 +81,7 @@ from finishup.protocol.coverage import (
 )
 from finishup.protocol.errors import ProtocolValueError
 from finishup.protocol.ids import IdKind, validate_id, validate_opaque_item_id
-from finishup.protocol.models import (
+from finishup.protocol.model_values import (
     ReceiptRedactionProfile,
     SemanticReason,
     SemanticStatus,

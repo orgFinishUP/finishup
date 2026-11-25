@@ -311,6 +311,25 @@ def _stop_owned_service(lock: Path, *, stop_service: bool, deadline: float) -> b
     return True
 
 
+def _check_retain_destination(root: Path, destination: Path, installation_id: str) -> None:
+    """Refuse, before anything is stopped or removed, a ``--retain-logs`` folder that cannot keep
+    the copy: it must be absolute, lie outside the root this disposal removes (a copy inside it
+    would be deleted with the root), have an existing parent, and hold no copy of these logs yet.
+    """
+
+    if not destination.is_absolute():
+        raise InstanceIdentityError("instance_root_invalid")
+    resolved = destination.resolve()
+    resolved_root = root.resolve()
+    if resolved == resolved_root or resolved.is_relative_to(resolved_root):
+        raise InstanceIdentityError("instance_root_invalid")
+    if not destination.parent.is_dir():
+        raise InstanceIdentityError("instance_root_invalid")
+    target = destination / installation_id
+    if target.exists() or target.is_symlink():
+        raise InstanceIdentityError("instance_root_invalid")
+
+
 def _retain_logs(root: Path, destination: Path, installation_id: str) -> bool:
     source = root / _LOG_DIR_NAME
     if not source.is_dir() or source.is_symlink():
@@ -357,6 +376,8 @@ def dispose_instance(
     identity = read_instance_identity(root / _STATE_DIR_NAME)
     if identity is None:
         raise InstanceIdentityError("instance_not_disposable")
+    if retain_logs is not None:
+        _check_retain_destination(root, retain_logs, identity.installation_id)
     lock = root / _STATE_DIR_NAME / SINGLETON_LOCK_NAME
     stopped = _stop_owned_service(
         lock, stop_service=stop_service, deadline=time.monotonic() + wait_seconds

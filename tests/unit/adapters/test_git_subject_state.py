@@ -6,6 +6,7 @@ import os
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -521,3 +522,194 @@ def _private_group_is(value: bool) -> Callable[[int, int], bool]:
         return value
 
     return answer
+
+
+def test_runner_writes_standard_input_only_when_asked(tmp_path: Path) -> None:
+    """A batch command reads its input while its answers are drained; otherwise stdin is null."""
+
+    repository = _repository(tmp_path)
+    workspace = open_local_workspace(repository)
+    blob = _git(repository, "rev-parse", "HEAD:tracked.txt").strip()
+    # Far more input and output than a pipe buffer holds, so writing all of it before reading
+    # any answer would deadlock.
+    missing = [f"{index:040x}".encode("ascii") for index in range(1, 4_001)]
+    request = b"".join(oid + b"\n" for oid in (*missing, blob))
+
+    _, answer = git_subject_state_module.run_read_only_git(
+        workspace,
+        ("cat-file", "--batch-check"),
+        stdout_limit=1_048_576,
+        stdin_bytes=request,
+    )
+
+    assert answer == b"".join(oid + b" missing\n" for oid in missing) + blob + b" blob 9\n"
+    # Without ``stdin_bytes`` Git still reads ``/dev/null``: an empty batch.
+    assert (
+        git_subject_state_module.run_read_only_git(
+            workspace, ("cat-file", "--batch-check"), stdout_limit=64
+        )[1]
+        == b""
+    )
+    # Empty input closes Git's standard input at once.
+    assert (
+        git_subject_state_module.run_read_only_git(
+            workspace, ("cat-file", "--batch-check"), stdout_limit=64, stdin_bytes=b""
+        )[1]
+        == b""
+    )
+    with pytest.raises(ValueError, match="git_output_limit"):
+        git_subject_state_module.run_read_only_git(
+            workspace, ("cat-file", "--batch-check"), stdout_limit=64, stdin_bytes=request
+        )
+
+
+def _outcome(call: Callable[[], object]) -> tuple[object, ...]:
+    try:
+        return ("ok", call())
+    except Exception as exc:  # noqa: BLE001 - the refusal itself is what is compared
+        limitation = getattr(exc, "limitation", None)
+        return ("refused", type(exc).__name__, limitation if limitation is not None else str(exc))
+
+
+def _counted_runs(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, ...]]:
+    runner_type: Any = getattr(git_subject_state_module, "_GitRunner")
+    real = runner_type.run
+    calls: list[tuple[str, ...]] = []
+
+    def run(self: Any, root: Path, arguments: Any, **kwargs: Any) -> Any:
+        calls.append(tuple(arguments))
+        return real(self, root, arguments, **kwargs)
+
+    monkeypatch.setattr(runner_type, "run", run)
+    return calls
+
+
+def _repository_shapes(tmp_path: Path) -> dict[str, Path]:
+    for parent in ("born", "unborn"):
+        (tmp_path / parent).mkdir(mode=0o700)
+    shapes = {
+        "born": _repository(tmp_path / "born"),
+        "unborn": _repository(tmp_path / "unborn", committed=False),
+    }
+    shapes["subdirectory"] = shapes["born"] / "sub"
+    shapes["subdirectory"].mkdir()
+    bare = tmp_path / "bare.git"
+    bare.mkdir(mode=0o700)
+    _git(bare, "init", "--quiet", "--bare")
+    shapes["bare"] = bare
+    separate = tmp_path / "separate"
+    separate.mkdir(mode=0o700)
+    _git(separate, "init", "--quiet", "--separate-git-dir", os.fspath(tmp_path / "elsewhere.git"))
+    shapes["gitfile"] = separate
+    linked = tmp_path / "linked"
+    _git(shapes["born"], "worktree", "add", "--quiet", "--detach", os.fspath(linked))
+    shapes["linked worktree"] = linked
+    sha256 = tmp_path / "sha256"
+    sha256.mkdir(mode=0o700)
+    _git(sha256, "init", "--quiet", "--object-format=sha256")
+    (sha256 / "file.txt").write_text("sha256\n", encoding="utf-8")
+    _git(sha256, "add", "--", "file.txt")
+    _git(
+        sha256,
+        "-c",
+        "user.name=FinishUP Test",
+        "-c",
+        "user.email=finishup@example.invalid",
+        "commit",
+        "--quiet",
+        "-m",
+        "baseline",
+    )
+    shapes["sha256"] = sha256
+    shapes["plain directory"] = tmp_path / "plain"
+    shapes["plain directory"].mkdir(mode=0o700)
+    return shapes
+
+
+def test_combined_rev_parse_fences_answer_exactly_as_the_separate_calls(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One ``rev-parse`` for the root fence and one for ``HEAD``; every refusal stays the same."""
+
+    default_runner: Any = getattr(git_subject_state_module, "_default_runner")
+    verify: Any = getattr(git_subject_state_module, "_verify_git_root")
+    verify_separately: Any = getattr(git_subject_state_module, "_verify_git_root_separately")
+    runner = default_runner()
+    adapter: Any = GitSubjectStateAdapter()
+    calls = _counted_runs(monkeypatch)
+
+    outcomes: dict[str, tuple[object, ...]] = {}
+    for name, root in _repository_shapes(tmp_path).items():
+        calls.clear()
+        combined = _outcome(lambda root=root: verify(root, runner))
+        combined_calls = len(calls)
+        assert combined == _outcome(lambda root=root: verify_separately(root, runner)), name
+        calls.clear()
+        head = _outcome(lambda root=root: adapter._head_identity(root))
+        head_calls = len(calls)
+        assert head == _outcome(lambda root=root: adapter._head_identity_separately(root)), name
+        outcomes[name] = combined
+        if name in {"born", "sha256"}:
+            assert combined == ("ok", None) and (combined_calls, head_calls) == (1, 1), name
+        if name == "unborn":
+            assert head == ("ok", ("sha1", "unborn")) and head_calls == 2
+
+    assert outcomes["bare"] == ("refused", "_CaptureFailure", SubjectStateLimitation.NOT_GIT)
+    assert outcomes["subdirectory"][:2] == ("refused", "_CaptureFailure")
+    assert outcomes["gitfile"][:2] == ("refused", "_CaptureFailure")
+
+
+def test_capture_digests_are_unchanged_by_the_combined_rev_parse(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for committed in (True, False):
+        (tmp_path / str(committed)).mkdir(mode=0o700)
+        repository = _repository(tmp_path / str(committed), committed=committed)
+        (repository / "untracked.txt").write_text("new\n", encoding="utf-8")
+        combined = GitSubjectStateAdapter().capture(_command(repository))
+        with monkeypatch.context() as patched:
+            patched.setattr(git_subject_state_module, "_verify_git_root_combined", _never_combined)
+            patched.setattr(git_subject_state_module, "_combined_head_identity", _no_combined_head)
+            separate = GitSubjectStateAdapter().capture(_command(repository))
+        assert combined == separate
+        assert combined.status is SubjectStateStatus.CAPTURED
+
+
+def _never_combined(_root: Path, _runner: object) -> bool:
+    return False
+
+
+def _no_combined_head(_root: Path, _runner: object) -> None:
+    return None
+
+
+@pytest.mark.parametrize("returncode", [None, 128])
+def test_a_combined_call_git_never_answered_is_not_asked_again(
+    tmp_path: Path, returncode: int | None
+) -> None:
+    """A timed-out or unspawnable combined call fails once; a refused exit status falls back."""
+
+    failure: Any = getattr(git_subject_state_module, "_GitProcessFailure")
+    verify: Any = getattr(git_subject_state_module, "_verify_git_root")
+    combined_head: Any = getattr(git_subject_state_module, "_combined_head_identity")
+    calls: list[tuple[str, ...]] = []
+
+    class FailingRunner:
+        def run(self, root: Path, arguments: Any, **kwargs: Any) -> Any:
+            calls.append(tuple(arguments))
+            raise failure(returncode)
+
+    with pytest.raises(failure) as caught:
+        verify(tmp_path, FailingRunner())
+    assert caught.value.returncode == returncode
+    # Git never answered: no second call. A refused exit status: the first separate call decides.
+    assert len(calls) == (1 if returncode is None else 2)
+
+    calls.clear()
+    if returncode is None:
+        with pytest.raises(failure) as caught:
+            combined_head(tmp_path, FailingRunner())
+        assert caught.value.returncode is None
+    else:
+        assert combined_head(tmp_path, FailingRunner()) is None
+    assert len(calls) == 1

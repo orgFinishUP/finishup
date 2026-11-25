@@ -251,3 +251,90 @@ def test_child_snapshots_roll_a_linked_pair_up_once_and_never_inherit_resolution
     )
     rows = _child_finding_snapshots(resolved_root)
     assert [(row.finding_id, row.resolved) for row in rows] == [(fnd(1), True), (fnd(2), False)]
+
+
+_RECOVERING_CHILD = "tsk_00000000-0000-4000-8000-000000000902"
+
+
+class _RecoveringCatalog:
+    """One direct child whose lineage read can fail transiently and then recover."""
+
+    def __init__(self) -> None:
+        self.fail = False
+
+    async def list_child_task_ids(self, _parent_task_id: str) -> tuple[str, ...]:
+        return (_RECOVERING_CHILD,)
+
+    async def task_lineage(self, _child_task_id: str) -> None:
+        if self.fail:
+            raise OSError("database is locked")
+        return None
+
+    async def task_source_provenance(self, _child_task_id: str) -> None:
+        return None
+
+    async def task_route(self, _child_task_id: str) -> None:
+        return None
+
+
+@pytest.mark.parametrize("ledger_kind", ("memory", "sqlite"))
+async def test_aggregate_that_returns_to_an_earlier_state_is_recorded_again(
+    ledger_kind: str,
+) -> None:
+    """A -> B -> A must leave A as the latest recorded manifest, not stick at B."""
+
+    from builders.ledger_adapters import (
+        FixedClock,
+        FixedIds,
+        append_command,
+        memory_adapter,
+        sqlite_adapter,
+    )
+    from finishup.protocol.models import LineageReadGapReason
+
+    command = append_command()
+    adapter = memory_adapter(command) if ledger_kind == "memory" else sqlite_adapter(command)
+    runtime = TaskRuntime(
+        command.task_id,
+        command.session_id,
+        command.writer_id,
+        frozenset({RuntimeCapability.WRITE, RuntimeCapability.STRUCTURAL_READ}),
+        cast(LedgerPort, adapter),
+        cast(ObjectStorePort, getattr(adapter, "_objects")),
+        cast(ImporterPort, object()),
+        "0.1.0",
+        "0.1.0",
+        "0.1",
+        "1.0.0",
+        cast(OwnershipFence, getattr(adapter, "_fence")),
+    )
+    catalog = _RecoveringCatalog()
+    coordinator = LineageManifestCoordinator(
+        runtime=cast(BundleRuntimePort, object()),
+        catalog=cast(StartCatalogPort, catalog),
+        clock=cast(ClockPort, FixedClock()),
+        ids=cast(IdPort, FixedIds()),
+    )
+
+    first = await coordinator.sweep(runtime)
+    assert first.manifest.children[0].read_gap_reasons == (LineageReadGapReason.MISSING,)
+    catalog.fail = True
+    second = await coordinator.sweep(runtime)
+    assert second.manifest.children[0].read_gap_reasons == (LineageReadGapReason.UNREADABLE,)
+    catalog.fail = False
+    third = await coordinator.sweep(runtime)
+
+    assert third.changed is True
+    assert third.append_result is not None
+    assert third.append_result.outcome == "accepted"
+    assert third.manifest.digest == first.manifest.digest
+    assert third.manifest.source_event_id not in (
+        first.manifest.source_event_id,
+        second.manifest.source_event_id,
+    )
+    assert third.manifest.children[0].read_gap_reasons == (LineageReadGapReason.MISSING,)
+
+    fourth = await coordinator.sweep(runtime)
+    assert fourth.changed is False
+    assert fourth.append_result is None
+    assert fourth.manifest == third.manifest

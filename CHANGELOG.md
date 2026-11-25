@@ -340,6 +340,13 @@ gates on #1056. This heading takes the release date when 0.3.0 is tagged. See
 
 ### Added
 
+- **A report of how much reviewer input the prompt cache served** (#1172). `finishup service
+  diagnostics --reviewer-cache` sums the per-exchange cache records still in the local diagnostics
+  log, for every review or one (`--request-id`), with exact integer totals, the cached share in
+  basis points, and the uncached input split by cause; `--json` prints `reviewer-cache-report`
+  1.0.0. A count the provider did not report stays unreported, never zero. It is owner-only and
+  command-line only, sends nothing, and covers only what the bounded log still holds.
+
 - **Review can read folders outside the workspace that you admit** (#1082). `finishup privacy
   input-roots add <folder>` lets AI-powered review read files the task names in that folder (for
   example a shared specification or the code being ported), after your approval in the trusted
@@ -622,6 +629,19 @@ gates on #1056. This heading takes the release date when 0.3.0 is tagged. See
 
 ### Changed
 
+- **Commands and hooks start faster; what they do is unchanged.** `finishup --version` and
+  `finishup version` answer about 20 times faster, `--help` appears in less than half the time,
+  and `finishup service status` with no service running answers in under 40% of the time. The
+  hook a host runs on each tool call (Codex, Claude Code and Cursor) takes about a fifth as long
+  in a workspace that has not been granted observation, and between 45% and 60% as long in one
+  that has. Replaying a long task ledger, the first MCP `tools/list`, change capture over many
+  modified files and `finishup setup status --host claude` are faster too. Output, exit codes
+  and ledger records are the same. Measured on Linux only. Measurements, how to replay them and
+  the few internal differences:
+  [startup and hot-path performance](docs/runbooks/startup-and-hot-path-performance.md).
+- **`--help` describes every command.** The 57 commands that listed no description, among them
+  `start`, `publish-work`, `check`, `respond`, `status` and `receipt`, now say what they do, and
+  `--deadline-ms` explains itself wherever it appears.
 - **Acceptance provenance is a receipt coverage note, not a Stop question** (#1101, ADR-033). The
   Stop hook no longer asks your agent to re-read the acceptance criteria of a resolved obligation
   FinishUP flags (a requested item never attempted, or evidence that is unlinked or only the

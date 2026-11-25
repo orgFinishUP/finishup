@@ -4,8 +4,10 @@ A review conversation carries its whole history on every exchange: a Codex threa
 upstream, a stateless route sends it again. The provider can serve an unchanged prefix of that
 input from its prompt cache, so after the first exchange every exchange may reuse all that the
 previous model request read. This module counts how much each exchange actually reused and, when
-it reused less, names the one structural cause FinishUP can see. It reads integers, message roles
-and FinishUP's own digest of the settings it sent; never transcript content.
+it reused less, names the one structural cause FinishUP can see. An exchange without counts still
+leaves a record that says why: the provider reported none, or FinishUP refused what it reported.
+It reads integers, message roles and FinishUP's own digest of the settings it sent; never
+transcript content.
 """
 
 from __future__ import annotations
@@ -19,12 +21,16 @@ __all__ = [
     "ExchangeCacheUsage",
     "ReviewerCacheMiss",
     "ReviewerCacheState",
+    "ReviewerUsageState",
     "exchange_cache_counts",
 ]
 
 type ReviewerCacheMiss = Literal[
     "none", "first_turn", "schema_or_settings_change", "compaction", "retry", "unexplained"
 ]
+# Why an exchange is recorded without counts: the provider reported no usage for it, or reported
+# counts FinishUP could not accept as consistent.
+type ReviewerUsageState = Literal["unreported", "refused"]
 
 # OpenAI-family prompt caches reuse a prefix from 1,024 tokens on, in whole 128-token blocks, and
 # the framing before the next message may differ by a few tokens: a shortfall of at most that
@@ -93,7 +99,7 @@ class ReviewerCacheState:
     """What one review's last exchange leaves its next exchange for cache accounting.
 
     A review's ``ReviewerSession`` owns it; a one-shot case uses a fresh one. ``prefix_tokens`` is
-    ``None`` after an exchange whose usage the provider never reported.
+    ``None`` after an exchange recorded without counts (its usage unreported or refused).
     """
 
     exchanges: int = 0
@@ -111,15 +117,17 @@ def exchange_cache_counts(
     roles: Sequence[str],
     usage: ExchangeCacheUsage | None,
     compacted: bool = False,
-) -> tuple[str, dict[str, object] | None]:
+    usage_refused: bool = False,
+) -> tuple[str, dict[str, object]]:
     """Advance ``state`` past one exchange; the request id and bounded counts it records.
 
     ``request_id`` is this exchange's provider request id; the record carries the review's first
     one, so every exchange of a review shares it (the attempt's ``provider_request_id``).
     ``settings`` digests what the route sends beside the messages (reply schema, model, effort,
     output limit). ``roles`` are the exchange history's message roles, empty for a one-shot case.
-    The counts are ``None`` when the provider reported no usage for the exchange, except that a
-    compaction is still recorded, by its index and label alone.
+    Without ``usage`` the exchange is still recorded, by its index and ``reviewer_usage_state``
+    (``refused`` when ``usage_refused``, else ``unreported``) and, after a compaction, its label;
+    it leaves the next exchange's prefix unknown. ``usage_refused`` is ignored beside ``usage``.
     """
 
     opened = state.exchanges == 0
@@ -127,8 +135,10 @@ def exchange_cache_counts(
         state.request_id = request_id
     prefix = 0 if opened else state.prefix_tokens
     changed = not opened and settings != state.settings
-    # The loop keeps an accepted reply in its history and replaces a rejected or malformed one
-    # with its one format-repair notice, so a previous answer missing here means a repair.
+    # The loop keeps an accepted reply in its history and leaves a rejected or malformed one out,
+    # appending its one format-repair notice instead, so a previous answer missing here means
+    # this is the repair exchange. The notice follows the unchanged previous input on every
+    # route, so the repair itself never breaks the prefix (#1172).
     repair = not opened and not (
         len(roles) > state.messages and roles[state.messages] == "assistant"
     )
@@ -137,13 +147,15 @@ def exchange_cache_counts(
     state.prefix_tokens = None if usage is None else usage.last_input_tokens
     review_request = state.request_id or request_id
     if usage is None:
-        # A compaction is labelled even when the turn reported no usage (it can come first).
+        usage_state: ReviewerUsageState = "refused" if usage_refused else "unreported"
+        marker: dict[str, object] = {
+            "reviewer_exchange_index": index,
+            "reviewer_usage_state": usage_state,
+        }
         if compacted:
-            return review_request, {
-                "reviewer_exchange_index": index,
-                "reviewer_cache_miss": "compaction",
-            }
-        return review_request, None
+            # A compaction is labelled even when the turn reported no usage (it can come first).
+            marker["reviewer_cache_miss"] = "compaction"
+        return review_request, marker
     counts: dict[str, object] = {
         "reviewer_exchange_index": index,
         "reviewer_model_requests": usage.requests,
@@ -192,5 +204,5 @@ def _miss(
     if changed:
         return "schema_or_settings_change"
     if repair:
-        return "retry"
+        return "retry"  # an otherwise unexplained shortfall on the review's repair exchange
     return "unexplained"

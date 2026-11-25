@@ -10,7 +10,9 @@ agent that holds the handle, through that connection's own write lock, and await
 ``workspace_reply``. Every wait is bounded: for an agent to appear (5 s inside a live control call,
 30 s for background work), for a call slot on the agent's connection, and for the reply. Every
 failure is a typed ``WorkspaceAgentUnavailable`` with a closed reason; nothing here logs or raises
-a path, an argument or anything the agent sent besides its closed reply reason.
+a path, an argument or anything the agent sent besides its closed reply reason. An answer that does
+not decode as the operation's result is ``reply_invalid``, and so is a per-path answer
+(``lstat_candidates``, ``probe_requested_paths``) with another number of rows than paths asked.
 
 A call is bounded by the control call it serves, when it serves one: the daemon enters
 ``workspace_call_deadline`` around each handler, so a workspace call never waits past the
@@ -85,6 +87,12 @@ MAX_PENDING_ARGUMENT_BYTES_PER_CHANNEL: Final = 2 * MAX_WORKSPACE_FRAME_BYTES
 _REPLY_GRACE_SECONDS: Final = 1.0
 # Less time than this left for a call is no time at all: it is not sent.
 _MIN_CALL_SECONDS: Final = 0.001
+# Operations whose result is one row per path asked, in the order asked, and the paths asked. A
+# reply with another number of rows decodes, yet answers none of them: it is ``reply_invalid``.
+_PER_PATH_ROWS: Final[dict[WorkspaceOperation, Callable[[Any], tuple[str, ...]]]] = {
+    WorkspaceOperation.LSTAT_CANDIDATES: lambda arguments: arguments.paths,
+    WorkspaceOperation.PROBE_REQUESTED_PATHS: lambda arguments: arguments.values,
+}
 # Operations that read and change nothing on the client: one whose connection dropped before it
 # answered is sent once more to another live connection of the same claim. An approved check may
 # already have run, so it is never sent twice.
@@ -830,6 +838,10 @@ class WorkspaceAgentHub:
         except WorkspaceCodecError:
             _record("workspace_call", "reply_invalid")
             raise WorkspaceAgentUnavailable("reply_invalid") from None
+        asked_paths = _PER_PATH_ROWS.get(spec.operation)
+        if asked_paths is not None and len(decoded) != len(asked_paths(arguments)):
+            _record("workspace_call", "reply_invalid")
+            raise WorkspaceAgentUnavailable("reply_invalid")
         if spec.operation is WorkspaceOperation.CODE_SYNC_PREPARE:
             self._remember_sync(handle, getattr(decoded, "sync_id", None), asked[-1])
         # What the agent answered is the client's attestation, never a read of this machine.

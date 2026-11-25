@@ -24,6 +24,7 @@ from finishup.adapters.reviewer_artifacts import (
 )
 from finishup.application.egress import ReviewerHistory
 from finishup.application.reviewer_broker import ReadRoot
+from finishup.application.reviewer_telemetry import read_usage_from_wire
 from finishup.ports.semantic import ReviewerMessage, SemanticResultReply
 from finishup.protocol.canonical import canonical_encode
 from finishup.protocol.models import SemanticStatus
@@ -112,6 +113,8 @@ async def test_read_budget_drops_whole_image_and_retains_explicit_facts(tmp_path
     text = data["text"]
     assert isinstance(text, str) and "dimensions: 2x2" in text
     assert isinstance(size, int) and size <= 2000
+    usage = read_usage_from_wire(broker.read_usage)
+    assert usage is not None and usage[0]["reason"] == "image_byte_budget"
 
 
 @pytest.mark.parametrize("blocked", ["permission", "unadmitted_bytes", "secret", "revoked"])

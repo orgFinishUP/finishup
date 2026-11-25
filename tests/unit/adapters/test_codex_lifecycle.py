@@ -608,3 +608,99 @@ def test_new_mapping_does_not_reuse_history_left_by_interrupted_clear(tmp_path: 
     store_mapping(mappings[2], _state=tmp_path)
     history = load_route_history(mappings[2], _state=tmp_path)
     assert history is not None and history.routes == () and not history.truncated
+
+
+def _fresh_mapping(codex_session_id: str) -> LifecycleMapping:
+    return mapping_from_start_ids(
+        codex_session_id=codex_session_id,
+        finishup_task_id=new_id(IdKind.TASK),
+        finishup_session_id=new_id(IdKind.SESSION),
+        finishup_writer_id=new_id(IdKind.WRITER),
+        last_frontier=None,
+    )
+
+
+def test_pending_queue_namespace_cannot_overwrite_a_mapping(tmp_path: Path) -> None:
+    # ``.<id>.pending`` is a valid opaque session token; its mapping file must
+    # stay disjoint from the queue of the session ``<id>``.
+    session, _, _, _ = _ids()
+    colliding_session = f".{session}.pending"
+    colliding = _fresh_mapping(colliding_session)
+    store_mapping(colliding, _state=tmp_path)
+
+    codex_lifecycle_module.queue_mapping_clear(session, _state=tmp_path)
+    with acquire_session_lock(session, _state=tmp_path) as owned:
+        assert owned
+        assert codex_lifecycle_module.apply_pending_mapping(session, _state=tmp_path)
+    assert load_mapping(colliding_session, _state=tmp_path) == colliding
+
+    queue_target = _fresh_mapping(session)
+    codex_lifecycle_module.queue_mapping_store(queue_target, _state=tmp_path)
+    assert load_mapping(colliding_session, _state=tmp_path) == colliding
+    with acquire_session_lock(session, _state=tmp_path) as owned:
+        assert owned
+        assert codex_lifecycle_module.apply_pending_mapping(session, _state=tmp_path)
+    assert load_mapping(session, _state=tmp_path) == queue_target
+    assert load_mapping(colliding_session, _state=tmp_path) == colliding
+    assert codex_lifecycle_module.pending_mapping_paths(session, _state=tmp_path) == ()
+
+
+def test_mapping_writes_cannot_drop_another_sessions_queued_operation(tmp_path: Path) -> None:
+    session, _, _, _ = _ids()
+    colliding_session = f".{session}.pending"
+    queued = _fresh_mapping(session)
+    codex_lifecycle_module.queue_mapping_store(queued, _state=tmp_path)
+
+    clear_mapping(colliding_session, _state=tmp_path)
+    store_mapping(_fresh_mapping(colliding_session), _state=tmp_path)
+
+    with acquire_session_lock(session, _state=tmp_path) as owned:
+        assert owned
+        assert codex_lifecycle_module.apply_pending_mapping(session, _state=tmp_path)
+    assert load_mapping(session, _state=tmp_path) == queued
+
+
+def test_legacy_queued_operation_replays_before_current_layout(tmp_path: Path) -> None:
+    # An older writer queued beside the mapping files. Its operation is older
+    # than any current-layout entry and replays first.
+    session, _, _, _ = _ids()
+    older = _fresh_mapping(session)
+    newer = _fresh_mapping(session)
+    legacy = (
+        codex_lifecycle_module.codex_lifecycle_dir(_state=tmp_path) / f".{session}.pending.json"
+    )
+    legacy.write_bytes(
+        canonical_encode(
+            {
+                "schema": "yoetz.pending-mapping/1",
+                "operation": "store",
+                "mapping": older.to_wire(),
+            }
+        )
+        + b"\n"
+    )
+    codex_lifecycle_module.queue_mapping_store(newer, _state=tmp_path)
+    assert len(codex_lifecycle_module.pending_mapping_paths(session, _state=tmp_path)) == 2
+
+    with acquire_session_lock(session, _state=tmp_path) as owned:
+        assert owned
+        assert codex_lifecycle_module.apply_pending_mapping(session, _state=tmp_path)
+        assert load_mapping(session, _state=tmp_path) == older
+        assert not legacy.exists()
+        assert codex_lifecycle_module.apply_pending_mapping(session, _state=tmp_path)
+        assert load_mapping(session, _state=tmp_path) == newer
+        assert not codex_lifecycle_module.apply_pending_mapping(session, _state=tmp_path)
+    assert codex_lifecycle_module.pending_mapping_paths(session, _state=tmp_path) == ()
+
+
+def test_legacy_queue_name_holding_a_mapping_is_not_a_queued_operation(tmp_path: Path) -> None:
+    session, _, _, _ = _ids()
+    colliding_session = f".{session}.pending"
+    colliding = _fresh_mapping(colliding_session)
+    store_mapping(colliding, _state=tmp_path)
+
+    assert codex_lifecycle_module.pending_mapping_paths(session, _state=tmp_path) == ()
+    with acquire_session_lock(session, _state=tmp_path) as owned:
+        assert owned
+        assert not codex_lifecycle_module.apply_pending_mapping(session, _state=tmp_path)
+    assert load_mapping(colliding_session, _state=tmp_path) == colliding

@@ -311,6 +311,42 @@ def test_missing_repository_private_candidate_inserts_without_human_ceremony() -
     assert state.transitions == {}
 
 
+def test_private_repository_under_an_evidence_guarded_ceiling_reads_back() -> None:
+    state = MemoryPrivacyCatalogState()
+    store = MemoryPrivacyPolicyStore(state, _Clock())
+    repository_scope = AuthorizationScope(
+        AuthorizationScopeKind.WORKSPACE, _INSTALLATION, _REPOSITORY
+    )
+    app = PrivacyPolicyApplication(
+        store,
+        _Audit(),  # type: ignore[arg-type]
+        _Gateway([]),  # type: ignore[arg-type]
+        _Clock(),
+        _Ids(),
+        _scope(),
+    )
+    machine = replace(_external_policy(), require_current_provider_data_use_evidence=True)
+
+    async def run() -> PrivacyPolicy:
+        await store.seed_if_absent(machine)
+        authority = await store.repository_authority(repository_scope)
+        await privacy_propose_policy(
+            app,
+            ProposePrivacyPolicyRequest(
+                authority.effective.effective_digest,
+                replace(_policy(), effective_scope=repository_scope),
+                authority.authority_digest,
+                repository_scope,
+            ),
+        )
+        return (await store.repository_authority(repository_scope)).effective.policy
+
+    policy = asyncio.run(run())
+    assert policy.profile is PrivacyProfile.LOCAL_ONLY
+    assert policy.network_egress_permitted is False
+    assert policy.require_current_provider_data_use_evidence is False
+
+
 @pytest.mark.parametrize(
     "candidate",
     (

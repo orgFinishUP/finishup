@@ -18,6 +18,7 @@ from finishup.adapters.release_runtime import (
     installation_prefix,
     release_update_lock,
 )
+from finishup.config.toml_text import load_toml_text
 from finishup.legacy_names import LAUNCHER_NAME, LEGACY_LAUNCHER_NAME
 
 # An explicit lower bound replaces an old exact installation pin and forbids downgrade.
@@ -95,7 +96,7 @@ def plain_uv_tool_receipt(receipt: str, name: str) -> PlainToolReceipt | None:
     """
 
     try:
-        document = tomllib.loads(receipt)
+        document = load_toml_text(receipt)
     except (tomllib.TOMLDecodeError, RecursionError):
         return None
     tool = document.get("tool")

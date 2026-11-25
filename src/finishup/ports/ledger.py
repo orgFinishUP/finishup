@@ -8,8 +8,9 @@ from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
+from functools import cache
 from types import MappingProxyType
-from typing import Final, Literal, Protocol, cast
+from typing import TYPE_CHECKING, Final, Literal, Protocol, cast
 
 from finishup.domain.coordination import (
     LineageAcceptance,
@@ -56,21 +57,11 @@ from finishup.ports.objects import ObjectKind, ObjectRef
 from finishup.protocol.coverage import Coverage, PublicationChannel
 from finishup.protocol.errors import ProtocolValueError, PublicErrorCode, PublicOperationError
 from finishup.protocol.ids import IdKind, validate_actor_id, validate_id, validate_opaque_item_id
-from finishup.protocol.models import (
+from finishup.protocol.model_values import (
     MAX_EVENTS_PER_BATCH,
-    CheckScopeModel,
     SemanticProgressPhase,
     SemanticReason,
     SemanticStatus,
-    StatusAssignmentItemModel,
-    StatusCompactItemModel,
-    StatusEvidenceItemModel,
-    StatusFindingItemModel,
-    StatusHistoryItemModel,
-    StatusHistoryItemV14Model,
-    StatusObligationItemModel,
-    StatusResultItemModel,
-    StatusVersionSliceModel,
     validate_semantic_outcome,
     validate_semantic_provenance_binding,
 )
@@ -80,6 +71,15 @@ from finishup.protocol.redacted_values import (
     SemanticRedactedValue,
     validate_semantic_redacted_values,
 )
+
+if TYPE_CHECKING:
+    import finishup.protocol.models as _protocol_models
+else:
+    from finishup.protocol.lazy_module import LazyModule
+
+    # The protocol models load on first use: a projection page holds model rows only after a
+    # reader built them, and a process that never reads a page never imports pydantic.
+    _protocol_models = LazyModule("finishup.protocol.models")
 
 __all__ = [
     "CheckChecklistItem",
@@ -2126,30 +2126,47 @@ class ProjectionQuery:
 
 
 type ProjectionItem = (
-    StatusAssignmentItemModel
-    | StatusCompactItemModel
-    | StatusEvidenceItemModel
-    | StatusFindingItemModel
-    | StatusHistoryItemModel
-    | StatusHistoryItemV14Model
-    | StatusObligationItemModel
-    | StatusResultItemModel
-    | StatusVersionSliceModel
+    _protocol_models.StatusAssignmentItemModel
+    | _protocol_models.StatusCompactItemModel
+    | _protocol_models.StatusEvidenceItemModel
+    | _protocol_models.StatusFindingItemModel
+    | _protocol_models.StatusHistoryItemModel
+    | _protocol_models.StatusHistoryItemV14Model
+    | _protocol_models.StatusObligationItemModel
+    | _protocol_models.StatusResultItemModel
+    | _protocol_models.StatusVersionSliceModel
 )
 
 
+@cache
+def _projection_item_types() -> tuple[
+    Mapping[str, type[ProjectionItem]],
+    frozenset[type[ProjectionItem]],
+    frozenset[type[ProjectionItem]],
+]:
+    """Return the page item type per view, every item type, and the history item types."""
+
+    models = _protocol_models
+    item_type_by_view: Mapping[str, type[ProjectionItem]] = MappingProxyType(
+        {
+            "assignment": models.StatusAssignmentItemModel,
+            "compact": models.StatusCompactItemModel,
+            "evidence": models.StatusEvidenceItemModel,
+            "findings": models.StatusFindingItemModel,
+            "history": models.StatusHistoryItemModel,
+            "obligations": models.StatusObligationItemModel,
+            "results": models.StatusResultItemModel,
+            "versions": models.StatusVersionSliceModel,
+        }
+    )
+    history_types: frozenset[type[ProjectionItem]] = frozenset(
+        {models.StatusHistoryItemModel, models.StatusHistoryItemV14Model}
+    )
+    return item_type_by_view, frozenset(item_type_by_view.values()) | history_types, history_types
+
+
 def _is_projection_item(value: object) -> bool:
-    return type(value) in {
-        StatusAssignmentItemModel,
-        StatusCompactItemModel,
-        StatusEvidenceItemModel,
-        StatusFindingItemModel,
-        StatusHistoryItemModel,
-        StatusHistoryItemV14Model,
-        StatusObligationItemModel,
-        StatusResultItemModel,
-        StatusVersionSliceModel,
-    }
+    return type(value) in _projection_item_types()[1]
 
 
 @dataclass(frozen=True, slots=True)
@@ -2206,22 +2223,10 @@ class ProjectionPage:
             )
         ):
             raise _invalid()
-        item_type_by_view = {
-            "assignment": StatusAssignmentItemModel,
-            "compact": StatusCompactItemModel,
-            "evidence": StatusEvidenceItemModel,
-            "findings": StatusFindingItemModel,
-            "history": StatusHistoryItemModel,
-            "obligations": StatusObligationItemModel,
-            "results": StatusResultItemModel,
-            "versions": StatusVersionSliceModel,
-        }
+        item_type_by_view, _, history_item_types = _projection_item_types()
         expected_item_type = item_type_by_view[self.view]
         if self.view == "history":
-            if any(
-                type(item) not in {StatusHistoryItemModel, StatusHistoryItemV14Model}
-                for item in self.items
-            ):
+            if any(type(item) not in history_item_types for item in self.items):
                 raise _invalid()
         elif any(type(item) is not expected_item_type for item in self.items):
             raise _invalid()
@@ -2448,7 +2453,7 @@ class LedgerPort(Protocol):
         semantic_provenance: SemanticProvenance | None,
         request_id: str,
         *,
-        scope: CheckScopeModel | None = None,
+        scope: _protocol_models.CheckScopeModel | None = None,
         semantic_conclusion: str | None = None,
         review_summary: str | None = None,
         verified: tuple[JsonObject, ...] = (),

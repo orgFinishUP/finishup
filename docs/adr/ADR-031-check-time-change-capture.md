@@ -64,8 +64,8 @@ remains refused. The same seam supplies CLI, MCP, hook-triggered checks, TUI and
    the task route's own. Request bodies, environment variables and ambient discovery never select
    a directory.
 3. **The task base is the commit HEAD named when the task was created.** A `start` that creates a
-   task (including a delegated child) records it before its result returns, so no agent edit or
-   commit precedes it. An empty repository records the empty tree. The base is an encrypted
+   task (including a delegated child, in the child's own bundle, and a parent-registered child)
+   records it before its result returns, so no agent edit or commit precedes it. An empty repository records the empty tree. The base is an encrypted
    `change_capture` object; the task bundle keeps its pointer in `bundle_meta` and inventories the
    object as a root. Attach and resume never record a base, because a later base would silently
    hide the commits made in between. A task without one (created before this decision, or whose
@@ -479,8 +479,10 @@ unchanged. The owner authorized the privacy/egress content-selection change on 2
    nested repository, is not credential-named, is a regular, singly linked file of the service user
    reached without a link, is at most 1 MiB and holds no NUL byte in its first 8000 bytes. An
    ignored file is never read: it is neither tracked nor listed. Each keeps at most 16 KiB, whole
-   or head and tail with the cut marked. The read is point-in-time, after the change proved
-   stable. Inputs are stored in the same encrypted
+   or head and tail with the cut marked; a byte that is not UTF-8 becomes U+FFFD in a whole text,
+   or is dropped (as in a head and tail) when those three-byte replacements would push a short
+   text past 16 KiB, so a short input is never lost to them. The read is point-in-time, after the
+   change proved stable. Inputs are stored in the same encrypted
    check-change object (optional `inputs`, so every object without them keeps its bytes), redacted
    one by one with the same detector (one that cannot be fully redacted is dropped; any redaction
    or dropped input reports `check_time_change_redacted`, even when the change text needed none),

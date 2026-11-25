@@ -12,7 +12,6 @@ from typing import Annotated, Any, Final, Literal, NoReturn, cast
 import typer
 
 from finishup.cli.bootstrap import control_failure, stdout_json
-from finishup.config.models import ConfigError, ExternalRuntimeProfileConfig
 from finishup.domain.privacy import ConversationReview, EgressChannel
 from finishup.ports.control import ControlError
 from finishup.protocol.canonical import JsonValue
@@ -31,6 +30,22 @@ def _run[T](operation: Callable[[], Awaitable[T]]) -> T:
 def _fail(message: str) -> NoReturn:
     typer.echo(message, err=True)
     raise typer.Exit(20)
+
+
+class _KeyEnteredNotReady(typer.Exit):
+    """Exit 20 after the hidden entry stored the key but readiness did not reload.
+
+    ``ai model`` must not roll back to the previous model on this exit: the new model's key is
+    already in the vault, so only the unlock continuation remains.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(20)
+
+
+def _entered_not_ready(message: str) -> NoReturn:
+    typer.echo(message, err=True)
+    raise _KeyEnteredNotReady
 
 
 def _usage_error(message: str) -> NoReturn:
@@ -124,6 +139,7 @@ def key() -> None:
     """Hidden key entry for the configured provider; also the last step of ``ai model``."""
 
     from finishup.cli.app import run_configured_provider_credential
+    from finishup.config.models import ConfigError
 
     try:
         action = _run(key_action)
@@ -138,11 +154,11 @@ def key() -> None:
     try:
         service = _run(restart_service_for_semantic_composition)
     except (ControlError, OSError, ValueError):
-        _fail(
+        _entered_not_ready(
             "Key entry completed, but readiness could not reload. Run finishup service unlock, then finishup ai status."
         )
     if service.get("state") != "ready":
-        _fail(
+        _entered_not_ready(
             "Key entry completed; unlock FinishUP before using it: finishup service unlock, then finishup ai status."
         )
 
@@ -163,6 +179,7 @@ async def forget_key() -> Literal["removed", "cancelled", "removed_not_ready"]:
 
     from finishup.cli.setup import restart_service_for_semantic_composition
     from finishup.cli.unlock import HumanCeremonyCliError
+    from finishup.config.models import ConfigError
     from finishup.service.confidential_client import ConfidentialClientError
     from finishup.service.confidential_protocol import ProviderCredentialTarget
     from finishup.service.vault import provider_credential_profile_binding
@@ -324,6 +341,8 @@ def status(
 ) -> None:
     """Show review mode, reviewer, model, key presence, and privacy permission."""
 
+    from finishup.config.models import ConfigError
+
     _refuse_extra_arguments(context)
 
     try:
@@ -417,7 +436,11 @@ def model(
     """Switch model; an API key remains bound to its old model until entered again."""
 
     from finishup.cli.setup import restart_service_for_semantic_composition
-    from finishup.config.models import primary_external_endpoint
+    from finishup.config.models import (
+        ConfigError,
+        ExternalRuntimeProfileConfig,
+        primary_external_endpoint,
+    )
     from finishup.config.write import (
         PROVIDER_PRESETS,
         config_write_snapshot,
@@ -514,7 +537,12 @@ def model(
     try:
         key()
     except (typer.Exit, typer.Abort, KeyboardInterrupt) as stopped:
-        if isinstance(stopped, typer.Exit) and stopped.exit_code == 0:
+        # Roll back only when the hidden entry itself did not finish. Once the new model's key is
+        # stored, a readiness reload that comes back locked (a passphrase vault with no stored
+        # copy) keeps the new model and leaves only the unlock continuation key() printed.
+        if isinstance(stopped, typer.Exit) and (
+            stopped.exit_code == 0 or isinstance(stopped, _KeyEnteredNotReady)
+        ):
             raise
         _restore_previous_model(config, written_bytes)
         raise
@@ -529,6 +557,7 @@ def _restore_previous_model(previous: object, written_bytes: bytes | None) -> No
     """
 
     from finishup.cli.setup import restart_service_for_semantic_composition
+    from finishup.config.models import ConfigError
     from finishup.config.write import write_config_toml_if_unchanged
 
     try:

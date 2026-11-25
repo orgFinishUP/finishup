@@ -61,6 +61,7 @@ __all__ = [
     "install_plugin",
     "legacy_plugin_tree_digest",
     "plugin_tree_matches_marker",
+    "plugin_unmanaged_files_continuation",
     "remove_legacy_plugin_tree",
     "render_plugin_install_tree",
     "render_plugin_tree",
@@ -119,6 +120,18 @@ class PluginInspection:
             f"presence={self.presence.value!r}, trust_observable={self.trust_observable!r}, "
             f"installed_digest={self.installed_digest!r})"
         )
+
+
+def plugin_unmanaged_files_continuation(project: Path) -> str:
+    """One recovery for a plugin directory holding files FinishUP did not write."""
+
+    return (
+        "FinishUP left the plugin directory at "
+        + str(project / ".agents" / "plugins" / _PLUGIN_DIRECTORY)
+        + " untouched because it holds files FinishUP did not write. Move those files, or the "
+        "whole directory, outside .agents/plugins to keep them, then rerun setup for this "
+        "project and selected Codex home. Rerunning without moving them will refuse again."
+    )
 
 
 def _error(
@@ -528,12 +541,16 @@ def plugin_tree_matches_marker(members: Mapping[str, bytes]) -> bool:
     return inventory == actual
 
 
-def _prior_managed_members(destination: Path) -> dict[str, bytes] | None:
-    """The tree's members when it is exactly one marker-consistent prior render, else None."""
+def _tree_files(destination: Path) -> dict[str, Path] | None:
+    """Every regular file in the tree by relative path, or None when it cannot be trusted.
+
+    None means the tree itself is a symlink or not a directory, holds a symlink or a
+    non-regular member, or cannot be listed. Directories carry no content and are skipped.
+    """
 
     if destination.is_symlink() or not destination.is_dir():
         return None
-    members: dict[str, bytes] = {}
+    files: dict[str, Path] = {}
     try:
         for candidate in destination.rglob("*"):
             if candidate.is_symlink():
@@ -542,10 +559,25 @@ def _prior_managed_members(destination: Path) -> dict[str, bytes] | None:
                 continue
             if not candidate.is_file():
                 return None
+            files[candidate.relative_to(destination).as_posix()] = candidate
+    except OSError:
+        return None
+    return files
+
+
+def _prior_managed_members(destination: Path) -> dict[str, bytes] | None:
+    """The tree's members when it is exactly one marker-consistent prior render, else None."""
+
+    files = _tree_files(destination)
+    if files is None:
+        return None
+    members: dict[str, bytes] = {}
+    try:
+        for relative_path, candidate in files.items():
             data = candidate.read_bytes()
             if len(data) > _SOURCE_FILE_LIMIT:
                 return None
-            members[candidate.relative_to(destination).as_posix()] = data
+            members[relative_path] = data
     except OSError:
         return None
     return members if plugin_tree_matches_marker(members) else None
@@ -555,6 +587,16 @@ def _is_prior_managed_render(destination: Path) -> bool:
     """True when the installed tree is exactly one marker-consistent prior render."""
 
     return _prior_managed_members(destination) is not None
+
+
+def _file_digest(path: Path) -> str:
+    """Streamed SHA-256 of one regular file of any size, or a fixed token when unreadable."""
+
+    try:
+        with path.open("rb") as handle:
+            return f"sha256:{hashlib.file_digest(handle, 'sha256').hexdigest()}"
+    except OSError:
+        return "unreadable"
 
 
 def _tree_digest(members: Mapping[str, bytes]) -> str:
@@ -621,7 +663,9 @@ def install_plugin(
     By default refuse when the packaged Codex tested set is empty (no supported profile
     yet). Observation setup may pass ``allow_untested=True`` to install hooks while still
     reporting that automatic activation is untested. Refuses to overwrite user-modified
-    managed files unless ``replace_modified`` is true.
+    managed files unless ``replace_modified`` is true. Always refuses, with
+    ``destination_conflict``, a destination holding files that are neither managed by this
+    render nor listed by a valid prior-render marker: replacement would delete them.
     """
 
     source = load_packaged_skill_source(resource_source)
@@ -651,6 +695,17 @@ def install_plugin(
                 prior_render = _is_prior_managed_render(destination)
             return prior_render
 
+        # The swap deletes the whole old directory, so every file in it must be FinishUP's:
+        # this render's members and marker, or a prior render's own marker inventory.
+        # Anything else is unmanaged content that is never removed (ADR-023 §9), and
+        # ``replace_modified`` covers edited managed files only. The refusal names no path,
+        # because an unmanaged file name is owner-controlled.
+        existing_files = _tree_files(destination)
+        if existing_files is None:
+            raise _error(IntegrationReason.TARGET_UNSAFE)
+        managed_paths = {*members, _MARKER_NAME}
+        if not existing_files.keys() <= managed_paths and not _replaceable_prior_render():
+            raise _error(IntegrationReason.DESTINATION_CONFLICT, {"unmanaged_files": True})
         for relative_path, expected in members.items():
             path = destination / relative_path
             if not path.exists():
@@ -806,16 +861,35 @@ def inspect_plugin(
         if not path.is_file() or path.is_symlink() or path.read_bytes() != expected:
             exact = False
             break
-    digest = canonical_digest(
-        {
-            "files": [
-                {"path": path, "digest": _sha((destination / path).read_bytes())}
-                for path in sorted(members)
-                if (destination / path).is_file()
-            ],
-            "marker_valid": marker_valid,
-        }
-    )
+    digest_body: dict[str, JsonValue] = {
+        "files": [
+            {"path": path, "digest": _sha((destination / path).read_bytes())}
+            for path in sorted(members)
+            if (destination / path).is_file()
+        ],
+        "marker_valid": marker_valid,
+    }
+    # Files FinishUP did not write make the tree not exact, and the digest binds them, so a
+    # preview cannot be approved while hiding content that install would refuse to remove.
+    existing_files = _tree_files(destination)
+    if existing_files is None:
+        exact = False
+        digest_body["unreadable_members"] = True
+    else:
+        managed_paths = {*members, _MARKER_NAME}
+        # Owner-chosen names may not be valid UTF-8, so the digest binds their bytes' hash.
+        unmanaged = sorted(
+            (os.fsencode(path), _file_digest(file))
+            for path, file in existing_files.items()
+            if path not in managed_paths
+        )
+        if unmanaged:
+            exact = False
+            digest_body["unmanaged_files"] = [
+                {"path_digest": _sha(name), "digest": file_digest}
+                for name, file_digest in unmanaged
+            ]
+    digest = canonical_digest(digest_body)
     if exact:
         return PluginInspection(
             PluginHookPresence.INSTALLED,

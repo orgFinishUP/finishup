@@ -420,7 +420,9 @@ helper for that server follows it (a few seconds at most; if it does not, Finish
 the next program starts a new one), and your next task uses the new level. If the server stops offering a copy, `server use lab` refuses
 (`server_level_unavailable`) until you choose `--level L1`: FinishUP never narrows your choice on
 its own. `--level L1` stops future updates; the copy already sent stays until you forget it or its
-time runs out.
+time runs out. `--level` and `--retention` apply only to a server elsewhere: `server use local`,
+`server use` of a server on this computer and `server add --local` refuse them as a usage error
+and change nothing, so the server you use and its connection stay as they were.
 
 ### What is sent, scanned and kept
 
@@ -510,8 +512,11 @@ goes too. The tasks that read the copy lose the captured changes and review exce
 from it, and their receipts say the copy and the excerpts derived from it were deleted, when, and
 whether you forgot it or its time ran out; their findings and checks stay. `forget --all` forgets
 every project this computer sent a copy to that server and names any it could not, with what to
-do; it ends with an error (`code_copy_forget_incomplete`) unless every one was forgotten. `list
---all` shows each of them the same way (`code_copy_list_incomplete` unless every one was listed).
+do; it ends with an error (`code_copy_forget_incomplete`) unless every one was forgotten. A
+project held from that server or kept on this computer whose record names nothing sent there is
+shown as never sent: the server is asked nothing about it, and when every project is like that,
+`forget --all` says that nothing was sent, asked or deleted. `list --all` shows each of them the
+same way (`code_copy_list_incomplete` unless every one was listed).
 
 These commands send the server only the copy's id: a keyed label for the project that names no
 folder, the same one that server already received when it asked this computer for that copy.
@@ -557,6 +562,13 @@ at level L1 on that server). What sends more is confirmed on your own terminal: 
 it changes, it is scanned again. `allow list` shows the allowed paths and a short fingerprint of
 their contents, never the contents. An exclusion wins over an allowed file. None of these takes
 back what was already sent; only forget does.
+
+FinishUP keeps up to 256 patterns and 256 allowed files for each project, for up to 256 projects
+per server; past that, the command changes nothing and asks you to remove one first. These choices
+live in a file on this computer, kept readable only by you. If that file is damaged or others can
+read it, no copy of any project's code is sent to that server, and these commands say so and how
+to repair it: make it readable only by you again, or remove it and record your choices again
+before work there syncs.
 
 ### Removing a server that keeps copies
 
@@ -651,6 +663,7 @@ certificate: FinishUP then serves plain HTTP on a loopback address only (for exa
 | `rest_listen_invalid` | `--listen` is not `HOST:PORT` with an IP address or `localhost`. | For example `--listen 0.0.0.0:8443`; port 0 picks a free one. |
 | `rest_listener_unavailable` | That address could not be used (in use, or not this computer's). | Choose another port or address. |
 | `service_already_running` | `--edge native` runs the service itself, and it is already running. | Stop it first (`finishup service stop`), or use the default gateway beside it. |
+| `api_key_limit` | This server already has 256 keys that are not revoked (expired ones count until you revoke them). | Revoke keys you no longer use (`finishup service api-key revoke KEY_ID`), then make the new one. |
 | `api_key_output_exists` | `--output-file` names a file that already exists. | Choose a new path; a key is never written over a file. |
 | `trusted_console_required` | A key is shown only on your own terminal, and the command ran without one; no key was made. | Run the command in your own terminal, or pass `--output-file`. |
 | `api_key_not_shown`, `api_key_output_failed` | The new key could not be shown, or written to the file, so it was revoked at once and nobody can use it. | Run the command again in your own terminal, or with a new `--output-file` path. |
@@ -665,6 +678,11 @@ certificate: FinishUP then serves plain HTTP on a loopback address only (for exa
 - An official FinishUP service: this release names none.
 - An SSH host certificate in place of a host key: FinishUP refuses such a server
   (`remote_identity_changed`).
+- Granting observation again after `finishup observe revoke` while an SSH or HTTPS server is in
+  use. The revoke stops observation at once, but FinishUP cannot yet finish withdrawing consent
+  for such a server, so a later `finishup observe grant` for the same project is refused while
+  that server is in use. `finishup observe revoke` says so when it happens, and running it again
+  does not change that.
 - SSH and HTTPS servers have been tried on Linux. macOS, and Windows through WSL 2, have not been
   tested yet as either end of an SSH or HTTPS server; on macOS a Python from python.org may need
   its certificates installed before FinishUP trusts a server through the system store.

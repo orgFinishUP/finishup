@@ -12,6 +12,7 @@ byte-identical is a conflict; another project's legacy activation is left alone.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
@@ -23,7 +24,8 @@ import subprocess
 import tempfile
 import time
 import tomllib
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Generator, Mapping
+from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from enum import Enum
 from pathlib import Path
@@ -62,6 +64,7 @@ from finishup.adapters.integrations.toml_tables import (
 )
 from finishup.config.foreign_write import project_root_admitted, writable_by_others
 from finishup.config.home_project import home_project_allowed
+from finishup.config.toml_text import load_toml_text
 from finishup.ports.integrations import (
     IntegrationError,
     IntegrationReason,
@@ -77,6 +80,7 @@ except ImportError:  # pragma: no cover - supported Codex plugin hosts are POSIX
     fcntl = None  # type: ignore[assignment]
 
 __all__ = [
+    "probe_window",
     "ActivationInspection",
     "ActivationPreview",
     "ActivationState",
@@ -294,7 +298,7 @@ class _CommandOutputLimit(Exception):
 
 def _error(
     reason: IntegrationReason,
-    details: Mapping[str, str] | None = None,
+    details: Mapping[str, str | bool] | None = None,
 ) -> IntegrationError:
     return IntegrationError(reason, {} if details is None else dict(details))
 
@@ -432,6 +436,35 @@ def _command_output(
     return _BoundedCommandOutput(completed.returncode, raw)
 
 
+# Probes already made in the open observation window (`probe_window`).
+_PROBE_WINDOW: ContextVar[dict[tuple[str, str], _CodexBinaryProbe] | None] = ContextVar(
+    "codex_probe_window", default=None
+)
+
+
+@contextlib.contextmanager
+def probe_window() -> Generator[None]:
+    """Probe one Codex executable once per read-only observation, not once per inspection.
+
+    One connection plan inspects the activation and previews it, and each binds the executable
+    to its version and digest by starting it. Inside one window that makes no change and waits
+    for nobody, a later probe of the same executable and home returns the first one's binding:
+    the answer it would give if the executable changed just after the window instead. Only
+    probes through the real subprocess runner are remembered, and a refused probe is not. The
+    window ends with its block, so an apply and a later status probe afresh. A window opened
+    inside another one shares it.
+    """
+
+    if _PROBE_WINDOW.get() is not None:
+        yield
+        return
+    token = _PROBE_WINDOW.set({})
+    try:
+        yield
+    finally:
+        _PROBE_WINDOW.reset(token)
+
+
 def _probe_codex_binary(
     executable_path: str,
     *,
@@ -440,6 +473,23 @@ def _probe_codex_binary(
 ) -> _CodexBinaryProbe:
     """Bind an exact executable/version to one explicitly controlled Codex home."""
 
+    window = _PROBE_WINDOW.get() if _run is subprocess.run else None
+    if window is None or type(executable_path) is not str:
+        return _probe_codex_binary_once(executable_path, codex_home=codex_home, _run=_run)
+    key = (executable_path, str(codex_home))
+    probe = window.get(key)
+    if probe is None:
+        probe = _probe_codex_binary_once(executable_path, codex_home=codex_home, _run=_run)
+        window[key] = probe
+    return probe
+
+
+def _probe_codex_binary_once(
+    executable_path: str,
+    *,
+    codex_home: Path | str | None,
+    _run: Callable[..., subprocess.CompletedProcess[bytes]],
+) -> _CodexBinaryProbe:
     if (
         type(executable_path) is not str
         or not executable_path
@@ -665,7 +715,7 @@ def _load_config(path: Path) -> tuple[bytes, Mapping[str, object]]:
         raise _error(IntegrationReason.SOURCE_INVALID)
     _owned_not_writable(path, directory=False)
     try:
-        parsed = tomllib.loads(raw.decode("utf-8"))
+        parsed = load_toml_text(raw.decode("utf-8"))
     except (UnicodeError, tomllib.TOMLDecodeError) as exc:
         raise _error(IntegrationReason.SOURCE_INVALID) from exc
     return raw, cast(Mapping[str, object], parsed)
@@ -916,7 +966,7 @@ def _legacy_config_plan(
     if plugin_owned:
         after = strip_exact_table(after, _LEGACY_PLUGIN_TABLE)
     try:
-        parsed = cast(Mapping[str, object], tomllib.loads(after.decode("utf-8") if after else ""))
+        parsed = cast(Mapping[str, object], load_toml_text(after.decode("utf-8") if after else ""))
     except (UnicodeError, tomllib.TOMLDecodeError) as exc:
         raise _error(IntegrationReason.WRITE_FAILED) from exc
     remaining_marketplaces = _table(parsed, "marketplaces")
@@ -1267,7 +1317,7 @@ def _rebind_marketplace(raw: bytes, old: str, new: Path) -> bytes:
         + raw[start + len(old_table.encode()) :]
     )
     try:
-        tomllib.loads(rebound.decode("utf-8"))
+        load_toml_text(rebound.decode("utf-8"))
     except (UnicodeError, tomllib.TOMLDecodeError) as exc:
         raise _error(IntegrationReason.DESTINATION_CONFLICT) from exc
     return rebound
@@ -1400,8 +1450,15 @@ def _source_cache_members(target: IntegrationTarget, *, codex_version: str) -> d
         # render), then bind the preview to the intended version-specific bytes.
         # Apply still requires an exact current renderer variant at its first
         # source fence before any mutation.
-        if plugin_tree_matches_marker(_read_managed_tree(source)):
+        installed = _read_managed_tree(source)
+        if plugin_tree_matches_marker(installed):
             return expected
+        # Files outside the managed inventory are owner content the source install refuses
+        # to remove (ADR-023 §9), not a partial FinishUP install. The detail is the one the
+        # source install gives: the reason alone also means a conflict in the Codex home, and
+        # whoever explains this refusal has to name the plugin directory instead.
+        if not installed.keys() <= expected.keys():
+            raise _error(IntegrationReason.DESTINATION_CONFLICT, {"unmanaged_files": True})
         raise _error(IntegrationReason.PARTIAL_INSTALL)
     actual_paths: set[str] = set()
     for candidate in source.rglob("*"):
@@ -1416,7 +1473,12 @@ def _source_cache_members(target: IntegrationTarget, *, codex_version: str) -> d
         else:
             raise _error(IntegrationReason.TARGET_UNSAFE)
     if actual_paths != set(expected):
-        raise _error(IntegrationReason.DESTINATION_CONFLICT)
+        # The tree changed after it was inspected as exact. A path outside the inventory is a
+        # file FinishUP did not write, as above; a managed file that went missing is not.
+        raise _error(
+            IntegrationReason.DESTINATION_CONFLICT,
+            {"unmanaged_files": True} if actual_paths - set(expected) else None,
+        )
     members: dict[str, bytes] = {}
     for relative_path in expected:
         path = source / relative_path
@@ -1848,7 +1910,7 @@ def _activation_plan(
     activation_config = (
         config
         if activation_raw == config_bytes
-        else cast(Mapping[str, object], tomllib.loads(activation_raw.decode("utf-8")))
+        else cast(Mapping[str, object], load_toml_text(activation_raw.decode("utf-8")))
     )
     block = _activation_block(project, activation_config)
     plugin_install_digest = _members_digest(cache_members)
@@ -2336,10 +2398,10 @@ def _activated_config_bytes(raw: bytes, config: Mapping[str, object], project: P
         # command in this home: move the exact FinishUP table to this project instead of adding a
         # second one (#1058).
         raw = _rebind_marketplace(raw, source, project)
-        config = cast(Mapping[str, object], tomllib.loads(raw.decode("utf-8")))
+        config = cast(Mapping[str, object], load_toml_text(raw.decode("utf-8")))
     merged = append_table_block(raw, _activation_block(project, config))
     try:
-        tomllib.loads(merged.decode("utf-8"))
+        load_toml_text(merged.decode("utf-8"))
     except tomllib.TOMLDecodeError as exc:
         # Legal owner TOML such as inline ``marketplaces = {}`` makes the appended
         # table headers re-declarations; refuse at plan time instead of writing a
@@ -2591,7 +2653,7 @@ def _config_table_plan(
         after = strip_exact_table(after, marketplace_table)
     if after != raw:
         try:
-            parsed = tomllib.loads(after.decode("utf-8") if after else "")
+            parsed = load_toml_text(after.decode("utf-8") if after else "")
         except (UnicodeError, tomllib.TOMLDecodeError) as exc:
             raise _error(IntegrationReason.WRITE_FAILED) from exc
         remaining_configured, remaining_enabled, remaining_foreign = _config_state(
@@ -2604,7 +2666,7 @@ def _config_table_plan(
 
 def _parsed_config(raw: bytes) -> Mapping[str, object]:
     try:
-        return cast(Mapping[str, object], tomllib.loads(raw.decode("utf-8") if raw else ""))
+        return cast(Mapping[str, object], load_toml_text(raw.decode("utf-8") if raw else ""))
     except (UnicodeError, tomllib.TOMLDecodeError) as exc:
         raise _error(IntegrationReason.WRITE_FAILED) from exc
 
@@ -3842,7 +3904,7 @@ def apply_removal(
         if current_config is None:
             current_config = b""
         try:
-            parsed_config = tomllib.loads(current_config.decode("utf-8") if current_config else "")
+            parsed_config = load_toml_text(current_config.decode("utf-8") if current_config else "")
         except (UnicodeError, tomllib.TOMLDecodeError) as exc:
             if mutation_started:
                 raise _error(IntegrationReason.WRITE_FAILED) from exc

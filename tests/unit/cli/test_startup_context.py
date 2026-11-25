@@ -42,10 +42,10 @@ def test_cue_contains_bounded_bootstrap_and_resume_rules(host: Literal["claude",
 
 
 def test_missing_packaged_guidance_keeps_a_recovery_cue(monkeypatch: pytest.MonkeyPatch) -> None:
-    def unavailable(_package: str) -> object:
+    def unavailable() -> object:
         raise OSError("private path must not appear")
 
-    monkeypatch.setattr(startup_context.resources, "files", unavailable)
+    monkeypatch.setattr(startup_context, "_open_guidance", unavailable)
     out = io.BytesIO()
     startup_context.handle_startup_context(host="cursor", stdout=out)
     cue = json.loads(out.getvalue())["additional_context"]

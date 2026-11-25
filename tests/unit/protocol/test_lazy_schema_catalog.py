@@ -235,7 +235,7 @@ async def _workflow_corpus() -> _Corpus:
         request_schema_id = _schema_id(_REQUEST_SCHEMA[case.method])
         if _stock_accepts(request_schema_id, request):
             corpus.append((f"{case.label}/request", request_schema_id, request))
-        result_model = control_protocol._WORKFLOW_RESULT_MODELS[case.method]
+        result_model = control_protocol._workflow_result_models()[case.method]
         result_frame = encode_control_frame(
             ControlResult(
                 protocol_version="1.0",
@@ -256,7 +256,7 @@ async def _workflow_corpus() -> _Corpus:
         )
         if not _stock_accepts(request_schema_id, request):
             continue
-        request_model = control_protocol._WORKFLOW_REQUEST_MODELS[case.method]
+        request_model = control_protocol._workflow_request_models()[case.method]
         request_frame = encode_control_frame(
             ControlCallRequest(
                 kind="call",

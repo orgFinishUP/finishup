@@ -25,7 +25,7 @@ replay, digests, and equality — and is not a check kind.
 
 | Command / shared name | Contract |
 | --- | --- |
-| `finishup ai setup` | `cli.ai.ai_app`; `cli.ai_setup.REVIEWER_QUESTION` and `REVIEWER_CHOICES` provide the identical three choices to the wizard and TUI. Calls `run_provider_setup` with agent opt-in, or `ai_powered` with `--every-task`; provider/model → mandatory privacy ceremony → hidden key entry. Not now records `local_only`. Every `ai` subcommand but `model` refuses extra arguments with exit 2 and a fixed message that never echoes them (a pasted key). `ai model` restores the previous model when the new model's key entry does not finish. `--set` remains supported. |
+| `finishup ai setup` | `cli.ai.ai_app`; `cli.ai_setup.REVIEWER_QUESTION` and `REVIEWER_CHOICES` provide the identical three choices to the wizard and TUI. Calls `run_provider_setup` with agent opt-in, or `ai_powered` with `--every-task`; provider/model → mandatory privacy ceremony → hidden key entry. Not now records `local_only`. Every `ai` subcommand but `model` refuses extra arguments with exit 2 and a fixed message that never echoes them (a pasted key). `ai model` restores the previous model when the new model's key entry does not finish; once that entry has stored the key, a readiness reload that fails or comes back locked keeps the new model and exits 20 with the unlock continuation. `--set` remains supported. |
 | `finishup ai key` | Presence selects set or rotate; unknown refuses. Successful key entry reloads the service through existing composition so readiness uses the stored key. `cli.app.run_configured_provider_credential(action)` wraps the existing confidential command. No secret argv, environment, file, stdin option, JSON or MCP input is added. |
 | `finishup ai forget-key` / `finishup provider credential remove` | Configured API binding (fallback when the primary is Codex), provider/model preview, default-No confirmation, then trusted foreground `provider_credential_remove` reauthentication. No API secret input or chat consent; binding/privacy unchanged. Reload readiness and report presence only; unknown deletion never claims success. `/provider` uses `hand_over_terminal` for this same flow. |
 | `finishup ai model [MODEL_ID]` | Current-marked reviewed catalog plus a custom ID. Config writes use the locked preimage check; provider keys remain exact-model-bound, with explicit reentry through `ai key`. The old binding stays stored. Codex uses its existing setup/capability ceremony. No privacy approval is inferred. |
@@ -588,7 +588,10 @@ token: a hook token is resolved from the hook's own exact reason (`render_hook_r
 and today only SessionStart's vault-locked advisory has one (`vault_unlock_required`). Hook contexts
 shared by several reasons (the status-read retry class), the service's retryable `storage_unsafe`
 fault, and a timed-out attachment keep their own instruction without a token. The TUI blocked report
-and receipt human text project the full directive lines from the registry. Compact receipt sentences
+and receipt human text project the full directive lines from the registry; for a public service
+error the TUI blocked report names the wire code (never the enum's Python spelling), the retryable
+marker, and the correlation ID, and resolves its directive from the error's `safe_details` through
+the same resolver as the CLI's human error rendering. Compact receipt sentences
 stay frozen. Advice and status `semantic_state` is the recorded attempt status (`ready` / `disabled`
 / `unavailable` / `failed`), not finding presence: a successful review with zero findings is
 `ready`, and `disabled` means no attempt was requested or configured. The state does not widen
@@ -871,6 +874,18 @@ free text from input. CLI exit classes (0/2/10/11/20/30/40/70/130) map from code
 
 ## 3. Protocol constants (`protocol/models.py` unless noted)
 
+The bounds below, the wire enums `DataCategory`, `ClientKind`, `IntegrationKind`,
+`LineageReadGapReason`, `LineageProvenanceRestriction`, `ReceiptRedactionProfile`,
+`SemanticStatus`, `SemanticReason`, and `SemanticProgressPhase`, and the AI-powered outcome
+validators are defined in the pydantic-free `protocol/model_values.py` and re-exported unchanged
+by `protocol/models.py`: each is the same object through both modules and keeps
+`finishup.protocol.models` as its `__module__`. The domain, kernel, and port modules an
+observation hook loads to refresh its advice import them from `protocol/model_values.py` and
+name pydantic or a protocol model only through `protocol/lazy_module.LazyModule`, so that hook
+never imports pydantic. The control client (`service/client.py`, `service/control_protocol.py`)
+likewise imports the workflow request and result models on the first workflow call or result, so
+`finishup service status` and an observation hook's outbox drain never import pydantic either.
+
 - `PROTOCOL_VERSION = "0.1"`; request/result `schema_version = "1.0.0"` per operation.
 - `MAX_EVENTS_PER_BATCH = 100`; `MAX_CANONICAL_REQUEST_BYTES = 1_048_576` (1 MiB);
   `MAX_FINDINGS_DEFAULT = 3`; `MAX_FINDINGS_LIMIT = 10`; `MAX_REASON_BYTES = 4_096`;
@@ -946,8 +961,10 @@ free text from input. CLI exit classes (0/2/10/11/20/30/40/70/130) map from code
 - Observed images (`cli/hook_io.py` `observed_image_facts`, P3-2, issue #1013): before media
   bytes are dropped, every host ingress records at most `MAX_OBSERVED_IMAGES = 8` images per
   event as the reserved structural member `observed_images` of a `PostToolUse` envelope (any host
-  value under that name is discarded). Each item is exactly `content_digest` (`sha256:` of the
-  decoded bytes), `byte_count`, `media_type` (sniffed from the bytes: `image/png`, `image/jpeg`,
+  value under that name is discarded). The limit counts decoded images in document order; a
+  candidate string that does not decode (a URL-sourced image block) is skipped and does not count.
+  Each item is exactly `content_digest` (`sha256:` of the decoded bytes), `byte_count`, `media_type`
+  (sniffed from the bytes: `image/png`, `image/jpeg`,
   `image/gif`, `image/webp`, or `image/unknown`), and optionally both `width` and `height` from
   the header alone (never for `image/unknown`). Control-request 2.9.0 (unreleased, additive in
   place) and `domain/observation.validate_observed_images` admit exactly that shape. The service
@@ -976,6 +993,14 @@ free text from input. CLI exit classes (0/2/10/11/20/30/40/70/130) map from code
   tuple[JsonValue, ...] | Mapping[str, JsonValue]`; arbitrary `Sequence` implementations are not
   protocol arrays.
 - `canonical_encode(value: JsonValue) -> bytes` — restricted-JCS bytes (ADR-002).
+  A value made only of exact `dict`, `list`, `tuple`, `str`, `int`, `bool` and `None` nodes is
+  checked in one walk and then written by the C JSON encoder; every other value takes the
+  node-by-node walker, with the same bytes and the same errors in the same order. The checked
+  value is read twice, so a caller must not mutate a value while it is being encoded: a value
+  that another thread or a finalizer changes between the check and the write can be encoded
+  as text the walker would reject, or raise the C encoder's `ValueError` instead of the
+  walker's `ProtocolValueError`
+  ([startup and hot-path performance](runbooks/startup-and-hot-path-performance.md)).
 - `canonical_digest(value) -> str` — `"sha256:" + hex(sha256(canonical_encode(value)))`.
 - `strict_json_parse(data: bytes | bytearray) -> JsonValue` — snapshots a `bytearray` once to
   immutable bytes, then performs strict UTF-8 parsing and rejects BOM/NUL, duplicate keys,
@@ -1021,6 +1046,19 @@ member's byte length and SHA-256.
 One boundary is narrower than before. A member outside every loaded closure whose bytes still match
 the manifest digest, but are not canonical or carry a wrong `$id`, is no longer refused by a hook.
 The service still refuses it, and so does any later full load.
+
+Protocol and config models (`finishup.protocol.models` and `finishup.config.models` with their
+subclasses) are likewise built on first use instead of at import. Every build of one runs under a
+single process-wide lock and resolves names from the model's own module, as the import-time build
+did; a JSON schema asked of a model and a `TypeAdapter` over one also wait for that build (every
+`TypeAdapter` over a model class adapts the model `ensure_built` returned, and an architecture
+test holds `src/` and `scripts/` to that). The service and the MCP bridge build every model before
+they serve, and the native REST edge builds them before its port listens. The required-startup
+probe (`startup_gate_probe`), a new process for every gate decision, builds the four models its
+compact status exchange would otherwise build on first use (`build_status_models`) before its
+650 ms bound opens, so the bound covers its connection and its status and no model build.
+Validation results, errors, serialization, and JSON schemas are unchanged; only a class's
+introspected `__init__` signature stays generic until the model is first used.
 
 The independent exhaustive path-to-`SchemaKind` map is: `events/* -> event`,
 `config/* -> config`, `version/* -> version_manifest`, and
@@ -1468,7 +1506,7 @@ Every status is paired with one required closed `SemanticReason`, never prose or
 MCP process receives an AI-powered check request; it is a route-local ceiling, not a durable-policy
 decision.
 `protocol/models.py` owns both enum objects, the immutable exhaustive status/reason relation, and
-its pair and final-provenance-binding validators. `domain/events.py`, `domain/findings.py`, and `ports/semantic.py` import those same
+its pair and final-provenance-binding validators (defined in `protocol/model_values.py`, see §3). `domain/events.py`, `domain/findings.py`, and `ports/semantic.py` import those same
 objects; the port owns only outcome conversion and may re-export them. `CheckRecordedPayload` and
 `CheckResultModel` require the pair; predispatch outcomes carry no attempt provenance. A present
 provenance record always repeats that same selected/final status and reason. Earlier late or
@@ -1577,6 +1615,14 @@ is a closed rule table that cannot observe the other, so both still report it. T
 composition layer resolves the overlap, dropping `weak_or_stale_response` only when
 `questionable_finding_rejection` was actually produced for the same finding and response event in
 the same run, so one response yields one actionable finding.
+
+Local findings of different rules can share a subject (a claim citing evidence captured at another
+tree draws both `evidence_does_not_support_claim` and `diff_does_not_match_account` on one
+subject), and a finding's identity is its policy, rule and subject. Each response rule therefore
+reports every qualifying response on one subject as one finding whose facts name each responded
+finding and response event; rejecting several findings on one subject never makes a pack fail. The
+collapse drops that `weak_or_stale_response` only when `questionable_finding_rejection` on the same
+subject names every response it reports; a stale or work-only response in the group keeps it.
 
 The collapse is keyed on the assessment research-evidence really emitted, not on re-deriving its
 predicate. When that pack is deselected via `policy_packs`, excluded by scope, skipped as
@@ -2606,7 +2652,9 @@ closed as `expired` with that terminal code so it stays in accounting, and a sec
 rows (`repair_retries_from_rows`), not coordinator memory, so it survives an `awaiting_human`
 replay. `response_schema_invalid`, `semantic_judgment_rejected`, policy blocks, human denial, secret
 detection, invalid case, stale frontier, refusal, quota exhaustion, and exhausted authority never
-retry. `confirm_every_request` requires a fresh foreground decision per physical attempt, the repair
+retry, and each keeps its own status and reason even when it ends the attempt on the last slot of
+the budget: `unavailable / retry_budget_exhausted` is reported only when a retriable last outcome
+uses up the budget. `confirm_every_request` requires a fresh foreground decision per physical attempt, the repair
 attempt included. Attempt accounting (`attempted_count`, `selected_attempt_id`, terminal reason
 counts, `exhausted`) is reconstructed from durable job/attempt rows via `load_semantic_job` +
 `list_semantic_attempts` — not from memory-only coordinator state. When `enqueue_semantic_job`
@@ -3425,6 +3473,10 @@ MCP text summaries retain only identities, counts, digests, and allowlisted gap 
 carry raw paths.
 The ordinary advice view carries the counterpart task and an exact project/detection/generation
 selector; its resource field follows the same sink-bound hydration and omission rules.
+The check result's project advisory notes (`live_member_present`, `duplicate_finding`) are current
+projection context attached after the check commits and on its exact replay. They hold at most 64
+notes, filled in project-id order and cut at that bound even between one project's two notes.
+Advice the result cannot carry is dropped with a diagnostic; it never fails the recorded check.
 
 **Bounded reversal and retired guards.** Live, consented project membership may disclose bounded
 sibling task identity and state through the service status projection. It never authorizes attach,
@@ -3679,12 +3731,59 @@ stream is closed and the listener admission slot is released. Active requests ex
 from the inactive timer until the final in-flight call completes; long-running calls are not
 cancelled solely for lack of a subsequent frame. Each control-result write is also wall-clock
 bounded (**5 minutes**): a peer that stops reading cannot retain an in-flight call entry (and
-thus the inactive-session exemption) indefinitely via send backpressure.
+thus the inactive-session exemption) indefinitely via send backpressure. A connection accepted
+while the service is draining or failed is closed at once, before any handshake, on the two
+endpoints the daemon's accept loop serves (control and human control): the daemon reads and
+answers nothing, and the connection's admission slot is released immediately. Secret ingress is
+not accepted by that loop (it takes one connection inside a live ceremony), so this refusal never
+applies to it. The close names no reason, and nothing orders it against the peer's first write, so
+the ordinary client sees either a hello write that fails (the close landed first) or, once its
+hello is written, end of stream or a transport error in place of the hello answer
+(`handshake_rejected`, below). When the service is this installation's own, the client reports
+both as the retryable `service_unavailable` with no `phase` that it reports for an accepted but
+silent endpoint (`accepted_but_unresponsive` in `finishup.service.client`), at once instead of
+after its 5-second attempt. Two facts together show this refusal (`_refused_by_own_service`).
+First, the holder is a live service of this installation: the singleton stamp shows this
+installation's identity (`_stamp_identity` is `same`) and the singleton lock is held. The stamp
+alone is advisory (a holder that exited leaves it behind, and its pid can be reused), so the flock
+decides whether it names a live holder. Second, the service did not fail the hello itself: the
+hello was never written, or it named no workspace, or, for a written hello that named one, the
+client sent one more hello on a new connection, naming no workspace, inside the same attempt, and
+the service closed that unanswered too. A serving service answers that second hello. The client
+then sends its own hello once more, on a third connection inside the same attempt, and that answer
+stands: a service whose refusal ended between the hellos (a lock that finishes draining) serves
+it, and the connection proceeds; a service that fails the hello closes it again, and that close is
+its own failed handshake, classified as one (below; the service records its fault once for each
+hello it failed). If the second connection finds nothing listening, the service stopped in between
+and the plain retryable `service_unavailable` of an absent service is reported. Each extra hello
+is an ordinary connection: the service counts it as client activity for its idle bounds. The
+client cannot see why a connection was closed, so two cases are classified by what it can see: a
+service of this installation that closes every hello for a reason of its own, even one that names
+no workspace, is reported as this refusal, and a service that starts refusing again between the
+second and third hellos (a stop that begins at that moment) can leave the third close reported as
+a failed handshake. Under any other stamp (another installation's, absent, unreadable, partly
+readable, or without identity keys), or a stamp whose lock is not held or cannot be inspected,
+nothing more is sent and the results are the earlier ones: an unanswered hello is classified by
+the stamp (below), `service_incompatible` or the non-retryable `service_unavailable` with `phase`
+`handshake` or `handshake_git_version`, and a hello write that fails is the plain retryable
+`service_unavailable`. Beside a stamp whose lock is free, a hello write that fails (or a
+connection nothing accepts) still lets on-demand startup start a successor, the path back from a
+stale stamp; a written hello closed unanswered there stays the non-retryable failed handshake and
+starts nothing. Every caller treats the refusal as a running service to wait for. On-demand startup
+reports it at once and neither spawns nor supersedes; its poll loop, which runs only after a spawn
+or behind a starting holder, keeps its 50 ms pace to its deadline. The MCP bridge latches it as a
+retryable outage, so each later call makes one quiet handshake (the availability latch, below).
+`finishup service restart` goes on to wait for the holder to release the singleton, then starts the
+successor. A service that stays failed keeps giving this retryable result, one bounded attempt per
+call; nothing here replaces it. The human-control client (`HumanControlClient`) reports the same
+close as `service_unavailable` (its write or read failed) or `ambiguous` (a bare end of stream); its
+errors carry no retry flag.
 
 The ordinary client independently bounds each connect-plus-handshake attempt to **5 seconds** and
 closes a half-open stream on expiry. On-demand startup has one **30-second** monotonic budget that
-includes its initial attempt, spawn, and polling; an accepted but silent existing endpoint is
-reported unavailable rather than causing a second daemon to be spawned.
+includes its initial attempt, spawn, and polling; an accepted but silent existing endpoint, or one
+whose service refused the connection (above), is reported unavailable rather than causing a second
+daemon to be spawned.
 
 The handshake pins the exact schema-manifest digest on both sides. When a listening
 service can decode the peer's hello as a known control-hello shape but the digest does
@@ -3694,7 +3793,8 @@ then closes without admitting a session. The client names an answered digest mis
 closes without answering) `handshake_rejected`. An answered `manifest_mismatch` maps to the
 retryable `ControlError` reason `service_incompatible` (public code `SERVICE_UNAVAILABLE`). A
 silent close proves nothing by itself, because a service of this very installation also closes
-when its own side of the handshake fails (#1040 follow-up, below); the client reads the singleton
+when its own side of the handshake fails (#1040 follow-up, below) and when it refuses the
+connection while draining or failed (above); the client reads the singleton
 stamp (`_stamp_identity` in `finishup.service.client`) and reports `service_incompatible` only on
 evidence: a present, validated field that differs from this installation's (a well-formed
 `schema_manifest_digest`, or a `service_version` that parses as a package version). A stamp with
@@ -3703,7 +3803,9 @@ neither identity key at all is not evidence either: FinishUP 0.1.x stamped only 
 manifest could be read and neither when it could not, and such a stamp lasts as long as its
 process, across an upgrade, so absence cannot tell an older installation from a compatible one
 (a current writer always writes `service_version` and adds the digest when it can read it, so a
-current service never writes that shape). A holder stamped with this installation's identity,
+current service never writes that shape). A holder stamped with this installation's identity that
+is not refusing connections (above: it answered a hello that names no workspace, or its singleton
+lock is not held),
 one whose stamp cannot be read, one whose identity fields are only partly readable (a key absent
 or present but invalid, beside fields that match), and one stamped without any identity key
 yields the non-retryable `ControlError("service_unavailable", phase=...)` described under "A
@@ -3735,9 +3837,11 @@ surfaces as `service_incompatible`; the bridge message then names `finishup serv
 for a newer holder, where it asks the user to reopen the session. A same-identity, partly readable
 or identity-less holder never reaches this path: its unanswered hello is the non-retryable
 `service_handshake_failed` ("A handshake the service failed", below), whose remedy is
-`finishup service diagnostics`. `finishup service restart`, given that error, replaces the holder only
-when its stamp carries no identity key, and otherwise reports it unchanged. The MCP bridge also retires a *compatible* holder
-whose hello reports an older package version than the bridge's, through the same stamped
+`finishup service diagnostics`, or, for a same-identity holder that is refusing connections, the
+retryable refusal described above. `finishup service restart`, given the failed handshake, replaces
+the holder only when its stamp carries no identity key, and otherwise reports it unchanged; given
+the refusal, it waits for the holder to release the singleton. The MCP bridge also retires a
+*compatible* holder whose hello reports an older package version than the bridge's, through the same stamped
 bounded-shutdown path, so the first session opened after an in-place `finishup upgrade --accept`
 switches to the new package. Until that transition, already-open processes use retained runtime
 copies; the transition may require older incompatible sessions to reopen (ADR-007,
@@ -3747,7 +3851,9 @@ Consented hook auto-attachment uses the same fixed on-demand launcher with
 `supersede_incompatible=False` and a one-second connection/startup budget. It reuses an
 already-stamped compatible starting holder only while an owner-only nonblocking flock probe
 confirms that the singleton is still held; an unheld stale stamp is ignored and the fixed
-launcher makes a normal flock-protected start attempt. A live incompatible or unknown stamped
+launcher makes a normal flock-protected start attempt. `finishup service restart` likewise treats
+the previous holder as released once the flock is free, even while a stale stamp names a pid an
+unrelated live process has since reused; a lock it cannot inspect is not a release. A live incompatible or unknown stamped
 holder is refused without signalling it. The authenticated handshake remains authoritative; the
 stamp is only a pre-spawn hint. Startup and the auto-attach `start` share the existing five-second
 RPC budget; turn-boundary retries retain their one-second outer budget and reserve part of it for
@@ -3867,7 +3973,8 @@ own write failed — is consumed, so a failed send emits no unhandled-future rep
 
 The MCP bridge maps every typed `ControlError` reason onto a public error through the public-error
 recorder (`{tool}_public_error`) with sink `reason` equal to the control-reason token (or
-`accepted_but_unresponsive` for an accepted-but-silent listener). `exception_control_error` and
+`accepted_but_unresponsive` for an accepted-but-silent listener or a service of this installation
+that refused the connection: draining, failed or closing). `exception_control_error` and
 `{tool}_internal_error` remain only for genuinely unexpected defects. Absent service uses
 `SERVICE_UNAVAILABLE` with the sanctioned `finishup service run` supervisor copy and same-`request_id`
 replay; an accepted-but-unresponsive listener uses distinct copy that forbids `finishup service run`
@@ -3913,12 +4020,20 @@ fails (a `RepositoryIdentityError` such as `git_version_unsupported` or
 `repository_identity_unavailable`, or any unexpected exception) `server_handshake` closes the
 connection without answering, admits no session, and raises `HandshakeServiceFault` (control
 reason `handshake_service_fault`, server-only) carrying the closed refusal token or, for an
-unexpected exception, that exception as its cause. The daemon records it once: a typed refusal as
+unexpected exception, that exception as its cause. A locator the peer got wrong is not such a
+fault: the hello schema bounds `workspace_locator.path` at 8192 characters while the locator
+itself is bounded at 8192 UTF-8 bytes, so a schema-valid path over the byte bound (or one that
+does not encode) is refused as `protocol_mismatch` before any resolver runs, whether or not the
+service resolves locators, exactly as a malformed `workspace_claim` or `workspace_agent` is. The daemon records it once for each hello it fails (when its stamp shows this installation
+and its lock is held, the client sends the same hello twice before it reports the failure, above):
+a typed refusal as
 public error `handshake_service_fault` with `reason_code` the token (component `service.daemon`,
 operation `control_handshake`); an unexpected exception through the unexpected-exception record
 with its class token, origin and `phase: handshake`. Neither record carries the locator, a path,
 Git output or stderr. The client sees only `handshake_rejected` and classifies it by the singleton
-stamp (above): for a holder of this installation, or of unreadable, partly readable or absent
+stamp (above): for a holder of this installation that still answers a hello naming no workspace
+and closes the same hello sent once more (so the close was not a draining or failed service's
+refusal), one whose singleton lock is not held, or one of unreadable, partly readable or absent
 identity, it records
 `service_handshake_failed` (component `service.client`, operation `control_handshake`) and raises
 `ControlError("service_unavailable", retryable=False, phase=<phase>, correlation_id=<that
@@ -4324,7 +4439,10 @@ transport, and durable egress-receipt path as inference. Only a provider refusal
 (HTTP 401/403) withdraws the record via `VaultService.discard_provider_credential(binding)` and
 fails the ceremony as `secret_rejected`; a rate limit counts as accepted, and timeout, transport
 failure, outage, or unsupported-profile answers leave the stored credential in place as
-unverified.
+unverified. A credential the vault itself refuses (outside 16..512 bytes or not token68) commits
+nothing and also fails the ceremony as `secret_rejected`; a `rotate` with no stored record fails as
+`record_missing`. Any failure of an effect ends the ceremony with one bounded reason and frees the
+ceremony slot.
 
 Pristine automatic keyring initialization requires both an approved create-if-absent/round-trip
 keyring probe and an installed `UserPresenceCapability` matching an active
@@ -4748,7 +4866,7 @@ never inside a repository, with exact field sets.
 | `yoetz.helper-registration/1` | `<target root>/state/registrations/<claim hex>-<worktree hex>-<registrant>.json` (layer 3) | `schema`, `target_id`, `registrant` (16 hex), `source` (`cli`, `hook`, `mcp_bridge`, `mcp_roots`, `registered_project`, `ui`), `claim` (`{identity_kind, digest, worktree}`), `worktree` (absolute, never sent), `repository_key`, `grant` (`{identity_digest, consent_digest, credential_generation}`), `server_profile` (the revision triple), `selection_bound` (the registering connection followed the selection file, rather than a root pinned on purpose), `registered_at`, `expires_at` (a 15-minute lease). At most 64 per target; written and pruned under the registry lock. See *Server profiles and consent*. |
 | `yoetz.helper-status/1` | `<target root>/state/helper-status.json` (SSH targets from layer 4, HTTPS and port targets from layer 5; ADR-052 decision 13) | `generation` (integer ≥ 1; moves on every change of phase or reason and with every new helper process), `phase` (`starting\|ready\|unavailable\|stopped`), `reason` (`null`; for `unavailable` a member of `REMOTE_CONNECTION_PHASES`; for `stopped` `idle_timeout`, `stop_requested`, `helper_failed`, `target_removed` or `zero_network_remote_selected`), `correlation_id`, `pid`, `started_at`, `style` (`relay\|direct`). Written by the helper only, atomically, never creating a removed target's folder; read by clients (the phase of a connection the helper closed, the bridge's availability latch) and `server status`. |
 | `yoetz.connection-style/1` | `<target root>/config/connection-style.json` (SSH targets from layer 4, HTTPS and port targets from layer 5) | `style` (`relay\|direct`); absent means `relay`. Written only by `finishup server set NAME --style`, after the helper (and, for SSH, the master) stopped. |
-| `helper.lock` | `<target root>/state/helper.lock` (SSH targets from layer 4, HTTPS and port targets from layer 5) | The helper's singleton flock, stamped with the holder's `pid`, package version and schema-manifest digest. The stamp is advisory (the release a client compares, the status latch); no process is signalled by it. |
+| `helper.lock` | `<target root>/state/helper.lock` (SSH targets from layer 4, HTTPS and port targets from layer 5) | The helper's singleton flock, stamped with the holder's `pid`, package version and schema-manifest digest. The stamp is advisory (the release a client compares, the status latch); no process is signalled by it. A client reads whether it is held with a momentary shared flock; a starting helper retries the lock for a short bound before it reads another helper as holding the target, so such a probe never makes it exit without serving. |
 | `yoetz.helper-epoch/1` | `<target root>/state/helper-epoch` (SSH targets from the layer-4 review, HTTPS and port targets from layer 5) | `schema`, `epoch` (32 lowercase hex, random), canonical JSON and a newline; absent reads as `none`. Every stop (`server disconnect`, `remove`, `use <other>`, `set --style`, `login`, `logout`, a replacement) writes a new token; the helper stops on its next tick when it moves, and one spawned with an older token (`helper run --epoch`) exits without serving once it holds the lock. Never sent to a server. |
 | `helper-epoch.lock` | `<target root>/state/helper-epoch.lock` (layer 7) | An empty owner-only flock: the fence between a client replacing one exact helper and a helper taking the singleton lock. The helper holds it while it takes `helper.lock` and reads the epoch; a replacing client holds it while it checks that the holder it decided about still holds the target and moves the epoch (otherwise it moves nothing and decides again). Never sent to a server. |
 | `yoetz.ssh-master/1` | `<target root>/state/ssh-master.json` and `state/ssh-master.lock` (SSH targets, direct style, layer 4 review) | `schema`, `host_key` (`sha256:<64 hex>`: the consented key the master verified) and `socket` (`[device, inode]` of `run/m` when it was verified); written under the flock `ssh-master.lock` by the process that started and verified the direct style's master, removed with every `-O exit`. A master is ridden only when this record names the current consent's key and its socket. Never sent to a server. |
@@ -5491,7 +5609,10 @@ a worker thread, never from the hub's own loop. `has_agent(handle)`, `bind_loop(
   `agent_disconnected`, `deadline_exceeded`, `agent_busy`, `operation_not_declared`,
   `reply_invalid`, `agent_unavailable`, `agent_refused`, `agent_failed` (the last three carry the
   agent's own closed `agent_reason`), `arguments_invalid`, `hub_unavailable` or `call_cancelled`. `.refused` is true
-  for `agent_refused`, whose public token is `workspace_agent_refused`. The hub logs closed tokens
+  for `agent_refused`, whose public token is `workspace_agent_refused`. A reply that does not
+  decode as the operation's result is `reply_invalid`, and so is a `lstat_candidates` or
+  `probe_requested_paths` reply whose row count is not the number of paths asked: those rows answer
+  no path, so none is matched up by guess. The hub logs closed tokens
   only and records each delivered answer under the `client_attested` label.
 
 `service/workspace_routing.py` wraps every workspace port and callable the ready composition
@@ -6344,7 +6465,10 @@ such as `parser.token = Token.EOF`, a lower-case object property such as `token:
 Token.ConstKeyword`, or a lower-case Python `token = node.token` assignment inside a valid
 function. Bare dotted assignments such as `TOKEN=opaque.value` or `token=opaque.value`,
 call-shaped values such as `password=functionName()`, quoted lookalikes, mixed-language text, and
-malformed source remain withheld. This precision rule does not add an opt-out.
+malformed source remain withheld. The Python exemption covers only the assignment's own bytes,
+located by the line ends Python itself counts (`\r\n`, `\r`, `\n`), so a form feed or Unicode
+line separator earlier in the source cannot move it onto other text (#1458). This precision rule
+does not add an opt-out.
 Since issue #982 the assignment heuristics also skip values that cannot be credential material:
 comparisons and walrus operators (`token == x`, `token := x`); an unquoted next key after a line
 break (an empty `KEY=` followed by `NEXT=`); unquoted language literals and type names (`None`,
@@ -6495,7 +6619,9 @@ external LLM construction and external task/user-content disclosure but is not a
 for the four non-LLM rows. `ReviewSelectionPolicy` is the closed sections/excerpt-kinds/relevance/
 finding-prose/exact-command/caps value owned by `domain/privacy.md`; overlays meet by set
 intersection, stricter relevance, logical AND for both booleans, and minimum caps. Selector growth
-or disabling the current-data-use guard is a policy loosening. Among those four rows, v0.1 owns a
+or disabling the current-data-use guard is a policy loosening. A composed policy keeps that guard
+when any composed scope sets it, and drops it only where no inference binding survives the meet
+(a `local_only` scope or a different binding), since nothing is left for it to gate. Among those four rows, v0.1 owns a
 production transport only for `update_checks`: a bounded structural PyPI transport behind a real
 setup yes/no (product default on). Setup renders the remaining three rows `unsupported`; enabling
 them returns
@@ -6511,7 +6637,11 @@ Interactive-only structural DTO (`finishup.application.package_update.PackageUpd
 `installed_version`, `latest_version` (nullable), `is_newer`, `upgrade_command`
 (`finishup upgrade`), `source` (`network|cache|none`). Setup reports may include a
 `package_update` object with the same field names. Work receipts and ledger documents never carry
-these fields.
+these fields. `latest_version` is null or a bounded ASCII PEP 440 version
+(`update_checks.is_release_version`): a registry answer, transport result or cached entry holding
+anything else is refused as `UpdateChecksTransportError("version_invalid")` (falling back to a valid
+cached entry, otherwise `skipped_unavailable`) and is never written to the update cache; a cache
+entry that fails the check is ignored and refetched.
 
 `ProviderBinding` is exactly the five nonsecret fields `provider_id`, `model_id`,
 `endpoint_profile_id`, `endpoint_profile_version`, and `transport` (`external|local_af_unix`); it
@@ -6725,7 +6855,15 @@ Invalid-result reasons stay exact without retaining provider plaintext: empty/no
 constrained-schema mismatch → `response_schema_invalid` (`failure_class=response_schema`);
 output truncation / provider `incomplete` / Chat Completions `finish_reason=length` →
 `response_content_invalid` (`failure_class=response_content`); case-bound post-validation
-rejection → `semantic_judgment_rejected`; real transport/deadline timeout → `provider_timeout`.
+rejection → `semantic_judgment_rejected`; real transport/deadline timeout → `provider_timeout`,
+including an HTTP connect/read/write/pool timeout the OpenAI SDK re-raises as its own timeout
+error (a connection-error subclass), on both the Responses and Chat Completions adapters; only a
+non-timeout connection failure is `transport_unavailable`.
+An HTTP error status is `unavailable` and records the same `failure_class` on both adapters: 401 →
+`authentication`, 403 → `authorization`, 404 (the endpoint does not serve that path) →
+`unsupported_profile`, 429 → `rate_limited` (public `provider_rate_limited`), 5xx →
+`provider_outage`, any other status → `transport`; every class but `rate_limited` reads publicly
+as `transport_unavailable`, with the exact class kept as the owner-only diagnostic.
 `incomplete` caused by the output token cap must not be labeled a transport timeout. The public
 pair is closed; for `dispatch_kind=external_runtime_oauth` the exact stage is carried separately as
 `runtime_evidence.failure_stage` (below) so an operator can tell malformed JSON from a wrong
@@ -6786,8 +6924,10 @@ factory only for the duration of one physical dispatch, and dispatches outside a
 effort and output limit:
 
 - `runtime_evidence.reasoning_effort` is the effort the attempt sent in `turn/start`.
-- `sampling_params.max_output_tokens` is the per-check output limit FinishUP enforced on the
-  runtime's visible output counters (`output_tokens − reasoning_output_tokens`).
+- `sampling_params.max_output_tokens` is the output limit FinishUP enforced on the runtime's
+  visible output counters (`output_tokens − reasoning_output_tokens`) for each turn: on a held
+  reviewer thread, a turn's own visible output (the thread's total less its total when the turn
+  started), as an API route's per-request `max_output_tokens` is.
 - `selection_sha256` is `canonical_digest({"budget_profile", "model", "output_limit",
   "reasoning_effort"})`. Attempts recorded before #571 committed to
   `{"model", "reasoning_effort"}`.
@@ -7109,7 +7249,11 @@ that publication only once. The record stays available across restart until term
 completion, then is consumed. Denial creates no record. Any source, manifest, plan, target,
 profile/version, mapping-version, or limit change produces another target digest and cannot reuse
 the decision. This is a local intake permission and does not authorize AI-powered review or other
-egress.
+egress. A replay while the pending consent is claimed for review, while another import's
+authorization holds the slot, or while the owner-only consent store is contended returns retryable
+`OPERATION_PENDING`; an unreadable or tampered pending or authorization record returns
+non-retryable `STORAGE_CORRUPT`. Neither publishes anything, and neither surfaces as an internal
+error. Replaying an already-completed import never fails on that record's cleanup.
 
 Importer publication identity is permanently reserved in both directions: the publishing
 writer/request pair and the source/ordinal pair are unique. Ordinals `0..batch_count-1` name
@@ -7275,9 +7419,11 @@ Shared closed types:
   frontier identity. Per-code first/last-seen history is retained separately and does not make a
   healed mapping, cursor, quarantine, or outbox condition remain current forever.
 - `HookSpool` — private legacy-host ingress only: `append(workspace, event, structural payload)`
-  makes one fsync'd bounded record keyed by a workspace HMAC; `claim(workspace commitment)` uses
-  rename fencing and exposes records to the READY service. A claim given a stop event stops waiting
-  for the workspace lock once that event is set and claims nothing. A stable spool UUID enters
+  makes one fsync'd bounded record keyed by a workspace HMAC, first ending any partial line that a
+  failed or interrupted earlier write left, so a claim discards only that fragment;
+  `claim(workspace commitment)` uses rename fencing and exposes records to the READY service. A
+  claim given a stop event stops waiting for the workspace lock once that event is set and claims
+  nothing. A stable spool UUID enters
   source identity, so crash replay is at-least-once and normal local ingest deduplicates it.
   Pending spool work projects `source_lag`; it is not an acknowledged observation.
 - `AdviceSnapshot` — ranked `AdviceItem` values (finding id, local rule code, priority,
@@ -7459,9 +7605,18 @@ Independent verification support (local control, not MCP):
   and the verification worker records no coverage gap. The `not_configured` status object carries
   the same keys as `trusted`/`untrusted` (`policy_digest: null`, `sandbox`, empty
   `executable_checks`, `network_check_state: not_requested`) plus a fixed `note`. Any other policy
-  read or parse fault stays `invalid_policy`; workspace or store faults report `unavailable`. Each
-  policy failure line is followed by a fixed continuation stating that the route is optional owner
-  configuration and never a `finishup-blocker`.
+  read or parse fault stays `invalid_policy`, including a check whose `timeout_seconds` falls
+  outside 0.1–300 (however large the number) or whose id or argv the approval model refuses: the
+  parser raises `invalid_approved_check_policy` for each. Workspace or store faults report
+  `observation_checks_<op>_failed:unavailable` with exit 20 on every verb, `revoke` included. The
+  one exception is the store's own typed refusal, such as a workspace state document or workspace
+  key it will not read (`STORAGE_CORRUPT`, `STORAGE_UNSAFE`): every verb reports it as
+  `finishup observe status` does, as `observation_checks_<op>_failed:<reason>: <message>` with that
+  code's exit (40 for `STORAGE_CORRUPT`, 20 for `STORAGE_UNSAFE`), and `status`, `preview`, and
+  `run` under `--json` emit the same `error` object with `operation: checks_<op>` and the store's
+  `retryable` flag. The refused file is left untouched. Each policy failure line is followed by a
+  fixed continuation stating that the route is optional owner configuration and never a
+  `finishup-blocker`.
 - `ObservationVerificationWorker` plus its repository — one generation-fenced lease per task
   bundle/workspace lane; newer subject digests stale older pending work, identical
   workspace/policy/approval/state tuples are cached, abandoned running work returns to pending,
@@ -7569,7 +7724,26 @@ is not a transition: it neither advances the epoch nor invalidates an in-flight 
 read-protection scope, or selection preview (issue #835). A structural grant over paused consent
 resumes it exactly as `resume` does. With no prior consent, or after revocation completes its project
 fence, a grant starts fresh with no ordinary profile; while that fence is pending, the grant is refused.
-Only an explicit profile set, `content-disable`, or revoke removes an arm. The call returns a
+Only the service's observation coordinator completes that fence and clears its durable token.
+`finishup observe revoke` revokes locally first (capture stops at once), then sends the same revoke
+to the service (`observation_revoke`, starting the service when absent), which fences the project
+generations and clears the token; when no service can be reached it says so on stderr
+(`observation_revoke_fence_pending:service_unavailable`) and exits 0, because the revoke itself
+holds. `finishup observe grant` over a pending fence first asks the service to finish it, so a
+fence left by an unreachable service is not a one-way door on a root a service of this computer
+serves: the everyday installation, an isolated root that is not a target, and a named local server
+(issue #1479). On a root that is, or may be, a server elsewhere
+(`targets.active_root_may_be_remote`: a `target.json` of a remote kind, or one that cannot be read)
+the fence is still a one-way door. Its token is in this computer's observation store for that
+server (ADR-051 decision 12); the server holds its own stores and never that token, and no service
+of this computer runs in such a root, so no request can clear it. Neither command sends anything
+for the fence there: `observe revoke` reports `observation_revoke_fence_pending:no_local_service`
+with a continuation that names no retry, still exiting 0, and a grant for that workspace stays
+refused in that root. Clearing it needs the server to run its own revocation for the workspace's
+claim and confirm it to this computer, and no control method does that yet: `observation_revoke`
+is not claim-bound, and a row attested `revoked` runs that revocation only when a row is left to
+send, and confirms nothing. Only an explicit
+profile set, `content-disable`, or revoke removes an arm. The call returns a
 `LocalConsentGrant` (`transition`: `granted`, `resumed`, `updated`, or `unchanged`, plus the
 resulting consent). The setup report's `observation_consent` block adds that `transition` and the
 retained `content_capture_profiles` beside the existing `outcome: granted`. `observe grant` prints
@@ -7590,6 +7764,20 @@ accepted completed-tool session route before optional verification policy setup.
 captured-content selection does not require an approved-check policy.
 
 Observation consent is one workspace-level confirmation recorded as a private workspace commitment.
+The commitment is an HMAC under the installation's observation key, which
+`LocalObservationStore.key_material()` creates once, only while no key file exists, and never
+rewrites. An existing key that cannot be read, is not a regular file, or is not exactly 32 bytes
+raises `STORAGE_UNSAFE` and is left untouched (`existing_workspace_commitment` raises the same
+rather than reporting no consent); a hook pass records that as
+`observe_exception_public_operation_error`, never as an unconsented workspace (issue #1390).
+A workspace state document (`observation/workspaces/<digest>.json`) starts fresh only when absent;
+one that exists but cannot be read, is not a regular file, or is empty, oversize, or invalid raises
+`STORAGE_UNSAFE` or non-retryable `STORAGE_CORRUPT` on every read and write and is never replaced
+(ADR-029, issue #1391).
+`LocalObservationStore.ingest` without an explicit workspace reads every workspace document to
+find the session's owner. A retryable failure to read any of them is raised as that
+`STORAGE_UNSAFE`. It is never answered as a `consent_missing` rejection, which reports only a
+decision made from documents that were read.
 Consent, status, pause, resume, revoke, setup probes, and hook ingress all canonicalize an explicit
 Git subdirectory to the same nearest safe Git project root; a non-Git directory remains its exact
 safe locator. A safe project root is the running user's own directory that no other account can
@@ -7912,7 +8100,9 @@ Outcome semantics and back-pressure vocabulary (ADR-022 decisions 12–13):
   `command_composition` and `runner_class`, computed from its arguments (`cmd`, `command`,
   `argv`) with the hook's normalization and key (OUT-005); reconciled by a hook, it and a
   `CommandExecution` item also carry that hook's own `write_scope`, `install_target` and
-  `effective_user` (`codex_session_stream.StreamCommandFacts`, placed under the call's `workdir`,
+  `effective_user` (`codex_session_stream.StreamCommandFacts`, handed the command as the row
+  states it, a string or a native argv, so both copies unwrap an argv by one rule and a noexec
+  `["bash", "-nc", SCRIPT]` reports no install on either; placed under the call's `workdir`,
   or with none under the reconciling hook's payload `cwd`, `observe_hooks._stream_command_facts(
   workspace_locator, session_directory)`), and read elsewhere only a relative `write_scope` placed
   under a stated absolute directory, unplaced otherwise (#1106 r2, r4). The Claude ordinary
@@ -8794,7 +8984,9 @@ preimages/proposals, installed managed source-tree digest, cache root
 `<home>/plugins/cache/finishup/finishup` and cache preimage/intended tree digest, and exact post-consent
 `plugin list --marketplace finishup --json` and `plugin add finishup@finishup --json` commands. Preview runs
 the version probe with both home variables set to a fresh owner-private temporary home, removes its
-scratch afterward, and performs no selected-home inventory read. After consent, apply forces both
+scratch afterward, and performs no selected-home inventory read. While one connection plan is
+prepared, its activation inspections and preview share one such probe of the same executable and
+home; a plan status and an apply probe afresh. After consent, apply forces both
 home variables to the approved home, re-probes under its lock, and CAS-fences each write. A later
 failure preserves approved partial marketplace/config/cache state for retry and performs no
 pathname rollback that could race a concurrent replacement.
@@ -8831,6 +9023,16 @@ and a cache that changes between preview and apply still refuses as `preview_sta
 source tree that byte-matches its own valid marker (for example a prior host-rendered or
 older-guidance render) is likewise a replaceable managed render, not a `modified_copy`; apply
 still requires a byte-exact current renderer variant at its source fences before any mutation.
+A project source tree that holds a file outside the managed inventory and is not such a render is
+never replaced: source install and activation preview both refuse it as `destination_conflict`
+with safe detail `unmanaged_files: true`, and inspection reports it as
+`installed_untrusted_unknown` (`installed_not_activated`), so removal stays available. Its one
+continuation is `plugin_unmanaged_files_continuation(project)`, a fixed sentence that names
+`.agents/plugins/finishup` and no file in it. `setup run|status --host codex` carry it as
+`next_step` in place of the Codex-home conflict text the same reason otherwise gets (the refused
+Codex plan brings it in `RuntimeError_.recovery`, which the terminal interface shows); the
+historical wizard carries it with `plugin_install_failed`, and an approved apply whose second
+preview meets the files carries it with `activation_preview_failed`.
 MCP server registration is a sibling port, never an `IntegrationsPort` overload (ADR-012).
 `HarnessMcpPort` methods are `status_registration`, `observe_registration`, `preview_registration`,
 `apply_registration`, `preview_unregistration`, and `apply_unregistration`, each taking a
@@ -9007,7 +9209,11 @@ observed, and the SHA-256 of every file it would write. `apply_host_admission` r
 preview, rechecks each exact byte preimage immediately before mutation, and refuses `preview_stale`
 on pre-mutation drift. It writes each surface atomically (`0600`, created folder `0700`, file or
 folder link refused), deletes a file that held nothing but a FinishUP entry, and re-reads and
-verifies the resulting state. A mutating preview carries `host_config_not_compare_and_swap`:
+verifies the resulting state: a grant must leave the host `present`; a revoke must leave every
+surface it edited `absent` and every surface it left alone in its previewed state, so a Cursor
+revoke that removes the exact `.cursor/cli.json` entry beside a `foreign` `.cursor/permissions.json`
+rule succeeds with `state_after` `foreign` (and a sweep reports `removed` with the changed surface),
+never `write_failed`. A mutating preview carries `host_config_not_compare_and_swap`:
 ordinary host files cannot exclude a non-cooperating same-UID writer in the final syscall window,
 so callers must quiesce host configuration writers during apply; a conflict after an earlier
 surface changed is `write_failed`, not an atomic rollback claim. For Codex, an exact table belonging
@@ -9262,7 +9468,10 @@ shows too).
 (preview `--action grant|revoke`; Claude `--checkpoint`; the host roots the route observation
 needs; `--accept --preview-digest` for the apply verbs, exit 3 without them, exit 1
 `host_admission_<reason>` on refusal); raw path, OS, and parser exception text never crosses this
-boundary.
+boundary. The preview's `next_command` is the matching apply verb with `<root>` and
+`<preview_digest>` placeholders, repeating every selector the preview was given: `--checkpoint`
+(which the digest binds, for grant and revoke alike), path selectors as `<flag-name>` placeholders,
+and a non-default `--mcp-ownership plugin-managed` or `--route-profile strict|policy` literally.
 
 `finishup provider status` emits the read-only `yoetz.provider-status/1` schema token. It reports two
 non-substitutable verdicts. `semantic_ready` is repository-bound structural readiness:
@@ -9737,7 +9946,13 @@ observation boolean. `CursorPluginStatus` also carries one `CursorMcpRuntimeObse
 live process scan ran, exact bounded counts of classified policy/strict/foreign `finishup mcp serve` processes,
 the live helper route or null, and `activation` exactly
 `unobserved|matched|full_restart_required`. Classification requires an exact `finishup` launcher token
-and known serve suffix; an unavailable or truncated scan is `unobserved`. Counts and closed tokens only — never raw argv, paths,
+and known serve suffix; an unavailable or truncated scan is `unobserved`. A project registration's
+known suffix is its absolute `--project-root`, then at most the Agent CLI's
+`--project-binding registered-project`, then at most `--semantic off`, as rendered. From Linux and
+WSL 2 argv any other tail is foreign. macOS `ps` text has no argument boundaries, so that scan is
+bounded: other text after the root that starts a long option (a space, two dashes, then a letter
+or digit) is foreign, including when it is part of the workspace path, and any other trailing
+text is read as part of a root that contains spaces. Counts and closed tokens only — never raw argv, paths,
 or parent command lines. File registration is not live runtime: a plugin-managed `policy` tree with
 a surviving Cursor-helper child on the strict argv is `full_restart_required`, and `HOST_ACTIVATION`
 stays `not_observed`. Reload Window is not a sufficient activation proof. SDK precedence is exactly that enum order. A higher-precedence or duplicate
@@ -9853,7 +10068,9 @@ and reports `version_provenance`: `tested` for an exactly proven cell
 `version_unsupported`/`minimum_version`. An `untested` host is admitted but never promoted to a
 proven cell. Preview also re-hashes the executable to detect stale identity, and refuses with
 `recovery_required` while interrupted stage/rollback material remains beside the marketplace source,
-before any mutation.
+before any mutation. Within one read-only observation (preparing a connection plan, or one plan
+status), a later check of the same unchanged executable (same device, inode, size, modification and
+change times) reuses the digest the first check took; an apply always re-hashes.
 
 `ClaudeCodePluginArtifact` contains one `PortablePluginPlan`, sorted native member mapping,
 generated strict marketplace manifest, separate artifact/marketplace digests, the exact bound
@@ -10457,7 +10674,9 @@ facade and are never MCP tools.
   overload or TCP fallback. Framing/schema/state-machine ownership remains in the ordinary and
   confidential protocol modules; these transport values never enter public workflow results.
   Ordinary-control connection admission is bounded: each accepted stream holds one of a fixed
-  listener capacity (128) until the stream closes. The daemon enforces private wall-clock
+  listener capacity (128) until the stream closes; an accept that fails, is refused, or is
+  cancelled while waiting (such as an expired or cancelled secret ceremony) returns its slot,
+  so only open accepted streams count against the capacity. The daemon enforces private wall-clock
   liveness bounds on that path (no wire fields, error reasons, configuration options, or public
   APIs): an ordinary-control client must complete the entire handshake — including partial-frame
   drip — within **5 seconds**, and after handshake a session with no active requests may remain
@@ -10508,7 +10727,13 @@ facade and are never MCP tools.
   or secret environment/config fallback exists. The keyring adapter additionally owns
   `OSKeyringProbe`, `KeyringInitializationBinding`, `FirstInstallKeyringAuthority`, and the
   mutation-free `authorize_first_install` gate; existing-mode `load` never mints or requires that
-  authority.
+  authority. The encrypted vault writes a record frame `<record_id>.<generation>.yzv` first and
+  commits it only by publishing the authenticated `vault-index.json`; the index alone is current
+  truth. A frame neither the in-memory nor the published index names is uncommitted residue of a
+  failed index publish or a crash: a failed publish removes the frame it just wrote, and a retry
+  of the same write replaces leftover residue that is a private regular file (anything else fails
+  `unsafe_permissions`), so a failed write never blocks its retry (#1393). A frame an index names
+  is never overwritten (`record_exists`).
 - `adapters/privacy/catalog.py`, `adapters/privacy/local_enforcer.py`, and
   `adapters/privacy/gateway.py`: implement policy/audit persistence, local classification and
   minimization, and the sole outbound gateway.
@@ -10545,8 +10770,12 @@ facade and are never MCP tools.
   cursor-observe|spool` fast paths without loading typer, then refuses native Windows
   (`os.name == "nt"`) with the fixed `unsupported_platform` line and exit 20 — the exit an absent
   service already carries, because no FinishUP service can be reached from that process — before the
-  full CLI loads; `version`, `--version`, `--help`, and `-h` are exempt (issue #709). Everything else
-  falls through to `cli/app.py` unchanged.
+  full CLI loads; `version`, `--version`, `--help`, and `-h` are exempt (issue #709). The exact
+  argument lists `--version` and `version` then print the bare package version, and exactly
+  `version --json` writes the version manifest, without loading typer, with the full CLI's bytes,
+  exit codes and failure lines, unless typer's `_FINISHUP_COMPLETE` completion variable is set. A
+  manifest that cannot be built falls through, so the full CLI renders the refusal. Everything
+  else falls through to `cli/app.py` unchanged.
 - `service/daemon.py`: sole application/runtime/vault/privacy/provider composition owner and
   ordinary-control dispatcher; starts into explicit `ready` or `locked`. Its private canonical
   installation marker owns immutable vault-mode publication. Unlock calls only
@@ -10686,7 +10915,27 @@ facade and are never MCP tools.
   `SemanticPolicy` values are exactly
   `optional_local_model|optional_external|scripted_fake|no_implicit_model`.
 - `config/write.py` / `config/privacy_desired.py`: atomic nonsecret TOML writers and privacy
-  desired-state export/apply classification (widen never silent).
+  desired-state export/apply classification (widen never silent). `privacy export-desired
+  --output` replaces a regular file by renaming a finished temporary file over the name a symlink
+  resolves to, keeping the old file's owner, group and permissions (a new file gets the default
+  mode). The temporary file is flushed to storage first, except on a file system that cannot be
+  told to flush. It writes in place where a rename cannot leave what a plain write leaves: a
+  device or pipe, a file with another hard link, a file whose owner a new file cannot be given, a
+  file whose extended attributes (its access-control list, security label and `user.*`
+  attributes) cannot be read or are not exactly those of the temporary file made beside it, and
+  a file whose folder does not allow the rename. Extended attributes are compared on Linux only.
+  Known gap: on macOS Python can read neither them nor an access-control list, so a file replaced
+  there loses both. A path that cannot be written, a read-only file included, fails as
+  `privacy_desired_output_unwritable` with nothing saved; an in-place write that stops after it
+  began fails as `privacy_desired_output_incomplete`. Both are CLI-only and exit 2, and neither
+  carries the path or the operating-system message.
+- `config/toml_text.py`: `load_toml_text()`, the one TOML parse every reader uses. Any document
+  `tomllib` cannot load raises `tomllib.TOMLDecodeError` (`TomlNotLoadable` for an integer past
+  the integer string conversion limit or deep inline nesting, which `tomllib` reports as
+  `ValueError`/`RecursionError`; it carries no message from the document and no position).
+  Each reader therefore keeps its own closed invalid-TOML outcome (`config_toml_invalid`,
+  `not_valid_toml`, `unknown`, `file_invalid`, `source_invalid`,
+  `invalid_approved_check_policy`) for every such file (issue #1484).
 - `config/paths.py`: platformdirs-based `bundle_root()`, `catalog_path()`, path safety checks
   (rejects repo/sync/network/world-readable locations). Ambient roots use one application name for
   every root: `finishup`, or `yoetz` for a Yoetz-era installation adopted in place
@@ -10841,17 +11090,33 @@ exception evidence is emitted before cleanup; cleanup records carry the same req
 missing diagnostics nor null provenance proves that no provider executed. Diagnostics are
 best-effort; absence can mean that the sink was unavailable, and never licenses a retry.
 
-`finishup service diagnostics --request-id req_…` reads matching owner-only records for the request
-returned by check/operation status. `--correlation-id err_…` remains supported; exactly one selector
-is required. Both use the same bounded, payload-free record projection and require no ledger
-inspection. No new retry, lease, cancellation, network or credential authority is introduced.
+`finishup service diagnostics --request-id req_…` reads the owner-only records that carry that
+request id. An AI-powered review attempt's failure stages above carry the check request id that
+check/operation status returns. A review's `exchange_cache` records ("Per-exchange prompt-cache
+telemetry", below) carry another id: the review's first provider request id, the attempt row's
+`provider_request_id`, minted for each attempt and never the check request id. That id is the
+`request_id` of the privacy receipt of the review's first exchange, but each later exchange's
+receipt has its own request id and no owner-visible surface marks which receipt opened a review, so
+the documented way to find it is `--reviewer-cache` without `--request-id`, which lists every
+review still in the ring by that id. `--correlation-id err_…` remains supported; without
+`--reviewer-cache`, exactly one selector is required. `--reviewer-cache` (issue #1172) takes no
+selector, for every review in the ring, or `--request-id` for one review, and refuses
+`--correlation-id`; it prints the reviewer cache report below (`--json`: `reviewer-cache-report`
+1.0.0), exits 0 when the ring holds at least one matching `exchange_cache` record and 1 when it
+holds none, and 2 on a malformed or refused selector. Every mode uses the same bounded,
+payload-free record projection and requires no ledger inspection. No new retry, lease, cancellation,
+network or credential authority is introduced.
 
 ### Status fault classification and project member containment (issue #840)
 
 A status request reaches the application already validated against its frozen schema.
 `INVALID_REQUEST` is therefore returned only from the explicit caller-shape sites: cursor decoding
 and binding, the requested frontier, selector and view consistency, and the translation of the
-caller's view, filter, and cursor position into a projection query. Any other `TypeError` or
+caller's view, filter, and cursor position into a projection query. A requested frontier is
+invalid when it is beyond the head or, on a task that has records, is genesis (`at_frontier`
+`"0"` or a cursor at sequence 0): the task has no state before its first record, so the
+application and the ledger's `query_projection` both refuse that read with `INVALID_REQUEST` on
+every view (issue #1395). Any other `TypeError` or
 `ValueError` raised while serving the read — including a pydantic `ValidationError` and the
 `CoordinationError`/`ProjectCommandError` family, which subclass `ValueError` — is a fault in stored
 state or in the service's own projection, and `application/status_faults.py` classifies it once by
@@ -11580,7 +11845,8 @@ placeholder-only quote, or a span with control or format characters, proves noth
 snippet is the verbatim span the quote matched: sent text, or for a JSON row the decoded string the
 reviewer read. If a response is recovered without the index,
 nothing is proven sent: quote-bearing challenges become `ref_not_carried` advisory concerns and
-verification rows with quotes are dropped.
+verification rows with quotes are dropped as snippet losses. Each item is decided on its own, so
+quote-free challenges and rows beside them are kept as recorded (issue #1409).
 
 Excerpt selection stays inside the approved count and byte budget. Reserved room comes first: the
 current diff, then the latest output per identified verification command (with the last failure
@@ -12945,8 +13211,11 @@ is a deletion or a submodule, otherwise it is omitted as `not_regular_file` with
 (Git's output for it is discarded). Every blob a shown section reads (`src`, and a non-zero `dst`,
 of mode 100644, 100755 or 120000) is verified: a loose object must be a regular, owner-only file
 (any link count) whose descriptor still has the recorded identity before and after it is read, and
-is inflated (`zlib`) and hashed from that descriptor; the blob is also read with `git cat-file blob`
-(at most 8 MiB each, 64 MiB in all) and hashed. Either mismatch omits the section as
+is inflated (`zlib`) and hashed from that descriptor; the blob is also read with `git cat-file`
+(at most 8 MiB each, 64 MiB in all) and hashed. With three or more such blobs, one
+`cat-file --batch-check` and one `cat-file --batch` read them, holding at most 8 MiB at once and
+using at most half the time left (none when under 5 seconds are left); any blob that batch does not
+answer cleanly is read on its own with `git cat-file blob`. Either mismatch omits the section as
 `object_unverified` (or `too_large` / `capture_limit` at the bounds), line counts withheld. The
 adapter overwrites the compressed and inflated buffers it owns. Tracked and untracked files whose
 base name is on the adapter's credential-name list are listed by name only (`credential_name`). The
@@ -12966,7 +13235,10 @@ included), `changed_during_capture` (the working tree moved during every attempt
 is withheld whole), recorded as a bounded `semantic_composition/check_time_change_unavailable` (or
 `start/task_change_base_unavailable`) diagnostic and never as text.
 
-- **Base.** A `start` whose outcome is `created` or `delegated` records
+- **Base.** A `start` that creates a task records, in that task's own bundle, before its result
+  returns: a `created` start, a parent-registered child (outcome `attached`, its session opened by
+  that start), and a `delegated` child (in the child's bundle when it is provisioned, never the
+  parent's); a handle attach, reattach, resume or replay records none. It records
   `TaskChangeBase(object_format, commit)` (the empty tree for an unborn repository) as an encrypted
   `change_capture` object of media type `application/vnd.yoetz.task-change-base+json`, schema
   `yoetz.task-change-base/1`. A `task_start` base also carries the task-start snapshot of the
@@ -13403,6 +13675,11 @@ is withheld whole), recorded as a bounded `semantic_composition/check_time_chang
   `strip_one_wrapper(argv)` step. Each simple command also retains its original `sources` and
   whether it is `nested`, solely for executable-resolution checks; these are never recorded or
   added to canonical verification commitments.
+  `segment_reads_arguments_as_data(segment)` says whether one simple command is a plain call of a
+  program known to only read its arguments (the inert set of `command_may_background`, plus
+  `git commit`). `observation_selection.compound_verification_gap_required` sets a quoted or
+  escaped separator aside only for such a call; for any other program the
+  `compound_outcome_unavailable` gap stays (ADR-046 G3).
   `command_segment_commitments` now also carries up to `MAX_CANONICAL_COMMITMENTS` (48) canonical
   commitments, `MAX_COMMAND_COMMITMENTS` (80) in all (the observed action `command` field, the hook
   structural list, the control-request 2.9.0 `maxItems` and `observed_failures` share that bound;
@@ -13424,7 +13701,15 @@ is withheld whole), recorded as a bounded `semantic_composition/check_time_chang
   `docs` (#1106: counts as an edit and as acting, never advances the latest edit;
   `observed_failures.STALE_EXEMPT_WRITE_TOKENS`, `observed_write_stales_verification(description,
   stale_exempt)`). `shell_writes.heredoc_patch_paths(command)` names the files a complete heredoc
-  fed to `apply_patch`, `git apply` or `patch` writes; `heredoc_patch_writes(command) ->
+  fed to `apply_patch`, `git apply` or `patch` writes (a body ends where bash ends it: on a line
+  exactly its delimiter, leading tabs ignored only for `<<-`, so a patch context line ` EOF` is
+  data, #1450; when the only closing line is one bash does not accept, the delimiter with a
+  trailing blank or an indent without `<<-`, the body runs to the end of the command, which bash
+  still feeds to the patch tool, so the patch is read to there and stays a write, and
+  `shell_heredocs(command)` returns that body too; a `<<` with no closing line of either kind
+  names nothing; the delimiter is read by the lexer's rule, so `<<\EOF` and `<<'END-PATCH'` feed a
+  patch, a `<<<` here-string opens none, and a patch tool fed a delimiter the reader cannot read,
+  such as `$'E\x4fF'`, is unplaced, #1451); `heredoc_patch_writes(command) ->
   HeredocPatchWrites(paths, unplaced)` adds whether an applying patch writes files it cannot place
   (`shell_write_scope(..., unplaced_writes=)` then counts it as `workspace`, #1106 r3; any file
   section with no readable `---`/`+++` pair, or a binary one, makes it unplaced, and `git apply`
@@ -13446,7 +13731,10 @@ is withheld whole), recorded as a bounded `semantic_composition/check_time_chang
   `typecheck`, ruff/flake8/pylint/pyflakes/pycodestyle `lint`, build/compileall `build`) and never
   counts an interpreter-run script as `build` by its name (ADR-042).
   `native_command_runner_class(argv)` unwraps at most one ordinary native host-shell layer for
-  runner classification; nested executable spelling remains visible. Generic `finalize` and
+  runner classification; nested executable spelling remains visible. A shell given noexec among
+  its own options (`bash -n FILE`, `bash -nc X`, `-o noexec`, zsh's `--no-exec`) runs nothing, so
+  the call classes `other` whatever its script or text names (`_shell_noexec`, #1444).
+  Generic `finalize` and
   `*_regression` names grant no verification credit. Exploration additionally requires established
   executable resolution and closed non-writing arguments, independent of canonical verification
   matching. Since PR #1080 round 5 the exploration class of a shell command keeps failed exploratory
@@ -13946,6 +14234,11 @@ the final exchange's evidence with that outcome before anything is persisted, so
 `runtime-attempt-evidence` 1.1.0 is unchanged and `retained` never reaches a stored record.
 If closing the held session reports `failed`, the final judgment is withheld: the result is
 `unavailable`, failure class `transport`, runtime stage and reviewer ending `cleanup_unconfirmed`.
+Cleanup is confirmed when no live member of the app-server's process group remains: after the
+leader exits, members the service inherited as a child subreaper (see the approved-check runner)
+are reaped, and a group whose remaining members have all exited counts as gone. A member that
+is still running after TERM and KILL still makes the outcome `failed`. Capability probes follow the
+same rule.
 An acknowledged Codex turn maps to `outcome_unknown`, preserving the existing no-retry rule.
 
 Active Codex turns account for notifications by four closed families (`control`, `telemetry`,
@@ -13959,52 +14252,171 @@ Discarded telemetry and streamed deltas no longer exhaust a 4,096-event allowanc
 the turn acknowledgement), and attempt `duration_ms` including cleanup. Per-message,
 request-queue and pre-disclosure bounds and all event/tool allowlists still apply.
 
-**Per-exchange prompt-cache telemetry (issue #1172).** Every provider exchange that reports usage
-writes one `exchange_cache` owner diagnostic (component `codex_app_server`, `openai_responses` or
-`openai_chat_completions`; reason `completed`, or `incomplete` when the Codex turn did not complete,
-the Responses status is not `completed` or the Chat Completions `finish_reason` is not `stop`). Its
-`request_id` is the review's first provider request id, the attempt row's `provider_request_id`, so
-every exchange of one review shares it and `finishup service diagnostics --request-id <id>`
-returns them all; a one-shot case names its own. Fields, all integers but the last:
+**Per-exchange prompt-cache telemetry (issue #1172).** Every provider exchange, except those listed
+below, writes one `exchange_cache` owner diagnostic with its token counts or the closed reason it
+has none (component `codex_app_server`, `openai_responses` or `openai_chat_completions`; reason
+`completed` when the generation finished, or `incomplete` when the Codex turn did not complete, the
+Responses status is not `completed`, or the Chat Completions response carries no choice or its first
+choice's `finish_reason` is `length` (truncated) or `content_filter` (filtered); a refusal that
+finished is `completed` on both API routes, as is a Chat Completions answer with any other finish
+reason, whether or not the route accepts it). Its `request_id` is the review's
+first provider request id, the attempt row's `provider_request_id`, so every exchange of one review
+shares it and `finishup service diagnostics --request-id <id>` returns them all; a one-shot case
+names its own. It is not the check request id, and no owner surface marks it as a review's, so
+`finishup service diagnostics --reviewer-cache` (below) is the way to list it. Fields, all integers
+but the last two:
 
 | Field | Meaning |
 |---|---|
 | `reviewer_exchange_index` | 1-based exchange of the review (a one-shot case is 1) |
 | `reviewer_model_requests` | model requests the exchange made |
-| `reviewer_input_tokens`, `reviewer_cached_input_tokens`, `reviewer_output_tokens` | provider-reported, summed over those requests; the cached count is absent when the provider did not report one |
+| `reviewer_input_tokens`, `reviewer_cached_input_tokens`, `reviewer_output_tokens` | provider-reported, summed over those requests; the cached count is absent when the provider did not report a consistent one |
 | `reviewer_cache_write_input_tokens` | provider-reported cache writes, absent where the provider did not report them |
 | `reviewer_prefix_tokens` | input of the previous exchange's last request: what this exchange could reuse (0 when it opened the conversation; absent when the previous exchange's requests are unknown) |
 | `reviewer_prefix_cached_tokens` | cached input of this exchange's first request (absent with the cached count) |
 | `reviewer_cache_miss` | closed label, below; `first_turn` and `compaction` are always recorded, and a later exchange has none when its prefix or cached input is unknown |
+| `reviewer_usage_state` | only on an exchange recorded without counts: `unreported` (the provider reported no usage for it) or `refused` (it reported counts FinishUP could not accept as consistent) |
 
 Codex counts are the thread's cumulative `total` across the turn; a snapshot whose input grew is one
 more request, and that snapshot's `last` names the request (a repeated snapshot is not another one).
 A turn starts at the total its previous turn left. When that turn reported no usage or had a usage
 snapshot refused, the turn starts instead at the total before its own first reported request (that
-snapshot's `total` less its `last`), so it records its own requests, not the thread's earlier
-ones, unless a repeated snapshot of the thread's total arrives first, which it would count as its
-own (#1192). A turn that had a usage snapshot refused records no counts (it may be missing a
-request) and leaves the next prefix unknown. Responses reads `usage.input_tokens`,
+snapshot's `total` less its `last`), so it records its own requests, not the thread's earlier ones,
+unless a repeated snapshot of the thread's total arrives first, which it would count as its own
+(#1192). A turn that had a usage snapshot refused records no counts (it may be missing a request)
+and leaves the next prefix unknown; it is `refused`. So is a turn whose counters do not fit
+together, for example a first request's `last` above its snapshot's `total` when the turn starts at
+their difference, or a cached total that grew by less than the first request's `last` says it read
+from the cache. A turn in which no snapshot reported a request (none arrived, or only repeats of the
+total the turn started at) is `unreported`. Responses reads `usage.input_tokens`,
 `usage.output_tokens` and, in `usage.input_tokens_details`, `cached_tokens` and
 `cache_write_tokens`; Chat Completions `prompt_tokens`, `completion_tokens` and the same two in
-`prompt_tokens_details`, which may be absent. A count the answer omits is left out, never recorded
-as zero. An answer without input and output counts records nothing. A compaction is still
-recorded then, by its index and label alone. The local model route records nothing (FinishUP
-observes no provider prompt cache there), nor does the credential probe.
+`prompt_tokens_details`, which may be absent. The input and output counts must each be an integer
+from 0 to 2^53-1 (not a boolean or a float); an answer whose usage object does not carry both is
+`refused`, and an answer without a usage object `unreported`. The cached count is kept only when it
+is such an integer and at most the input, the cache-write count only when it is such an integer. A
+count the answer omits or reports otherwise is left out, never recorded as zero, and the exchange's
+input and output are still recorded, its input still the next exchange's prefix (#1172).
+
+An exchange recorded without counts holds `reviewer_exchange_index`, `reviewer_usage_state` and,
+when the turn saw a compaction, `reviewer_cache_miss` `compaction`; no token count and no other
+label. Its prefix stays unknown, so the next exchange records no `reviewer_prefix_tokens` and no
+guessed label. An exchange with counts never carries `reviewer_usage_state`. What is still not
+recorded, and does not advance the review's exchange index: the local model route (FinishUP observes
+no provider prompt cache there), the credential probe, an API request that fails before an answer
+arrives (a transport failure, timeout or error status), and a Codex exchange that fails before its
+turn's settings are fixed (for example at launch, account, model or thread start). Within a review's
+records, a missing index therefore means a line was lost: the ring evicted it or its best-effort
+write failed.
 
 `reviewer_cache_miss` is the first that applies: `compaction` (a `thread/compacted` notification or
 `contextCompaction` item in the turn, recorded even where the reviewer then refuses it);
-`first_turn` (the exchange opened the review's conversation; every one-shot case); `none` (the
-first request's cached input falls short of the prefix by at most 1,024 tokens, the providers'
-minimum cacheable prefix; they cache whole 128-token blocks from there, so a prefix that short is
-`none` even when nothing of it was cached);
-`schema_or_settings_change` (the digest of what the route sends beside the messages differs from
-the previous exchange's: the Codex `turn/start` parameters except `input` and `threadId`, or the API
-body except `input`/`messages`); `retry` (the history does not carry the previous answer, so this
-is the loop's one format repair); `unexplained`. The state between a review's exchanges is
-`ReviewerSession.cache` (`domain.reviewer_cache.ReviewerCacheState`): counts, the last history's
-message count and that settings digest, never content. Recording never changes an outcome: any
-failure in it is dropped. A record is at most 656 bytes, inside the ring's 1,024-byte line cap.
+`first_turn` (the exchange opened the review's conversation; every one-shot case); `none` (the first
+request's cached input falls short of the prefix by at most 1,024 tokens, the providers' minimum
+cacheable prefix; they cache whole 128-token blocks from there, so a prefix that short is `none`
+even when nothing of it was cached); `schema_or_settings_change` (the digest of what the route sends
+beside the messages differs from the previous exchange's: the Codex `turn/start` parameters except
+`input` and `threadId`, or the API body except `input`/`messages`); `retry` (an otherwise
+unexplained shortfall on the review's one format-repair exchange, which the history shows by not
+carrying the previous answer; the repair appends its note after the unchanged previous input on
+every route, so the repair itself is not what breaks the prefix); `unexplained`. What the reviewer's
+switch to the read-free schema cost as `schema_or_settings_change` in a measurement, and why it
+stays, is recorded in the ADR-006 amendment "measured cost of the reply-schema change, and why
+review behaviour stays as it is". The state between a review's exchanges is
+`ReviewerSession.cache` (`domain.reviewer_cache.ReviewerCacheState`): counts,
+the last history's message count and that settings digest, never content. Recording never changes an
+outcome: any failure in it is dropped. A record is at most 656 bytes (one without counts at most
+359), inside the ring's 1,024-byte line cap.
+
+**Reviewer cache report (issue #1172).** `finishup service diagnostics --reviewer-cache
+[--request-id <id>] [--json]` reads the `exchange_cache` records still in the owner-only diagnostics
+ring (every review's, or the one review's) and prints
+`domain.reviewer_cache_report.reviewer_cache_report(records, request_id=)`. The `--json` form is
+`reviewer-cache-report` 1.0.0 (`schemas/service/reviewer-cache-report-1.0.0.schema.json`, golden
+vectors `fixtures/service/reviewer-cache-report-1.0.0.case.json`). The function is pure,
+integer-only and total: no clock, no I/O, no float, and no record makes it raise. Its coverage is
+the ring's: the ring keeps the newest 256 KiB of lines, so an older review may be absent entirely
+and an old review may have lost its first exchanges. The report is:
+
+| Field | Meaning |
+|---|---|
+| `schema_version`, `source` | `"1.0.0"`; `"diagnostics_ring"` |
+| `request_id` | the `--request-id` selector, or `null` for every review |
+| `coverage.records_read` | `exchange_cache` records read (with a selector, those carrying it) |
+| `coverage.unreadable_records` | of those, records that are not well-formed, or whose sums the report could not hold (below); they add nothing else |
+| `coverage.reviews`, `coverage.exchange_records` | distinct request ids; readable records |
+| `coverage.duplicate_exchange_records`, `coverage.missing_exchanges` | sums of the per-review counts below |
+| `coverage.earliest_record_at`, `coverage.latest_record_at` | the readable records' oldest and newest timestamps, or `null` |
+| `reviews[]` | one entry per request id, in ascending byte order of the id: `request_id`, `exchange_indices`, `usage` |
+| `exchange_indices.highest`, `.distinct` | highest exchange index seen; distinct indices seen |
+| `exchange_indices.duplicate_records` | records whose index another record of the review already has |
+| `exchange_indices.missing`, `.missing_ranges` | indices from 1 to `highest` no record has, and the same as ascending inclusive `{first, last}` ranges |
+| `total` | the `usage` shape below, over every readable record |
+
+`usage` (each review's and `total`):
+
+| Field | Meaning |
+|---|---|
+| `exchange_records` | readable records |
+| `exchanges_with_counts`, `exchanges_unreported`, `exchanges_refused` | records with token counts; records whose `reviewer_usage_state` is `unreported` or `refused` |
+| `model_requests`, `input_tokens`, `cached_input_tokens`, `cache_write_input_tokens`, `output_tokens` | each `{sum, exchanges}`: the sum over the records that carry that count and how many did; `sum` is `null` when none did, never 0 |
+| `cached_share` | `cached_input_tokens` over `input_tokens_of_exchanges_reporting_cached` (the input of the records that carry a cached count, not all input), and `basis_points_floor` = ⌊cached × 10,000 / that input⌋, `null` when that input is 0 |
+| `miss_labels` | records per `reviewer_cache_miss` value, and `no_label` for records without one (every record, counted or not) |
+| `first_turn.cold`, `.warm`, `.cached_unreported` | `first_turn` records with counts whose first request read nothing from the cache (`reviewer_prefix_cached_tokens` 0), read something an earlier review or attempt left (above 0; `prefix_cached_tokens` sums it), or reported no cached count: `exchanges` and `input_tokens` |
+| `beyond_prefix` | records split exactly (below) that are not `first_turn`: `exchanges`, `input_tokens` (input minus prefix: new tokens no earlier exchange of the review held) and `surplus_cached_tokens` (cached input above the prefix, which the provider served from elsewhere) |
+| `uncached_input` | `exchanges` and `tokens` (input minus cached input) of the records that carry a cached count, and the partition of `tokens` below |
+
+A well-formed record has operation `exchange_cache`, a request id, a millisecond timestamp, an
+exchange index of at least 1, and is one of the two shapes `domain.reviewer_cache` writes: with
+`reviewer_usage_state` (`unreported` or `refused`), no token count and no label but `compaction`; or
+with integer request, input and output counts, at least one request, the cached and prefix-cached
+counts present together, cached at most input and prefix-cached at most cached; at index 1 (the
+exchange that opened the conversation, which is also every one-shot case and the first exchange a
+restarted attempt records again) prefix 0 and the label `first_turn` or `compaction`; `first_turn`
+at no other index; `none`, `schema_or_settings_change`, `retry` and `unexplained` only with a known
+prefix and cached count, and no label only when one of those is unknown. Anything else, including a
+value the diagnostics fence read back as `unavailable`, is unreadable. Every readable record is
+summed, duplicates included: a restarted attempt that kept its request id records its exchanges
+again, and their tokens were spent again. No record replaces another. Records are accounted in one
+canonical order: reviews in ascending byte order of request id, a review's records by exchange
+index and then by their other fields. A well-formed record whose accounting would carry any sum of
+the report (a review's, `total`'s, or the coverage duplicate and missing totals) past 2^53-1, the
+bound of every report integer, is counted in `unreadable_records` as well and adds nothing else.
+Every sum only grows along that order, so which record that is, and so the whole report, is the
+same for the same records in any input order. An exchange that is not recorded does not advance
+the index, so a missing index is a lost line (the ring evicted it or its best-effort write
+failed); a duplicate can hide a lost line of the same index, so `missing` is a lower bound.
+
+`uncached_input.tokens` is split, exactly, into `first_turn_cold`, `first_turn_warm`, `shortfall`
+(`none`, `schema_or_settings_change`, `compaction`, `retry`, `unexplained`), `beyond_prefix` and
+`unattributed` (`prefix_unknown`, `shortfall_exceeds_uncached`, `not_split_by_request`). A record's
+`reviewer_prefix_cached_tokens` is its first model request's cached input, while its input and
+cached counts sum every request, so only a record of one request whose cached count equals its
+prefix-cached count is split exactly. For such a `first_turn` record, all its uncached input is
+`first_turn_cold` or `first_turn_warm`. For any other such record with a prefix, the shortfall
+max(0, prefix − prefix-cached) goes under its label (`none` keeps its within-tolerance shortfall)
+and the rest under `beyond_prefix`. A record of more requests (or whose two cached counts differ)
+still has its first request's shortfall attributed to its label, and the rest is
+`not_split_by_request`: later requests re-read earlier ones and the record does not say which of
+them missed; a `first_turn` record of more requests is all `not_split_by_request`. A record without
+a prefix (the previous exchange had no counts) is all `prefix_unknown`. A record whose shortfall is
+larger than its whole uncached input read something other than the prefix (a history a compaction
+rewrote, or counts that do not fit), so it is all `shortfall_exceeds_uncached` and none of it is
+attributed. Whether `first_turn` input is the largest uncached share (ADR-006's revisit condition
+for cross-review reuse) is `first_turn_cold` plus `first_turn_warm` against the other parts.
+
+Without `--json` the command prints a fixed layout: the scope, a line saying the records are what
+the diagnostics log still holds, the coverage counts, then `total` line by line (each sum with its
+number of contributing exchanges, or "not reported by any exchange"; the cached share as the floor
+basis points written as a two-place percentage, "of the N exchanges still in the diagnostics log
+that reported a cached count"; each part of the partition) and one line per review (its known
+missing indices, a lower bound, and its cached share). When no exchange covered reported a cached
+count, one line says so in place of the cached share, the uncached input and its partition, and a
+review's line says so in place of its share: they have no basis, and zeros would read as everything
+cached. The report is
+owner-only and local: the CLI reads the ring file under the instance's log directory, as the other
+modes do, and nothing else. It is not offered over MCP tools, hook events or the terminal interface
+(ADR-006, 2026-11-21 amendment).
 
 `complete(history, schema, deadline=)` returns the reply object. It raises the decoder's
 `ReviewerReplyInvalid("output_not_json")` only for a completed answer that is not one JSON object
@@ -14514,7 +14926,10 @@ recomputation solely because the finding names paths.
   `case_invalid`.
 - `ReviewerRun.read_usage` and `FinalSemanticEvaluation.reviewer_read_usage` hold private
   selector/result rows. `application.reviewer_telemetry.read_usage_from_wire(value)` validates
-  the five-row bound and the closed action args; it returns null for absent/invalid telemetry.
+  the five-row bound, the closed action args and the closed reason set
+  `domain.reviewer_reads.REVIEWER_READ_REASONS` (every reason the broker and the reviewer-read
+  admission issue, declared-test and image limits included); it returns null for absent/invalid
+  telemetry.
   `reviewer_read_usage` is persisted only in the encrypted semantic response and recovered
   with it; it never enters the public reviewer record or result-leaf registry.
 - `application.reviewer_telemetry.export_reviewer_read_metrics(attempts, objects)` accepts
@@ -15082,7 +15497,8 @@ over REST.
   `active|revoked|expired`; never a secret); `revoke KEY_ID` ("Revoked API key KEY_ID." or "… was
   already revoked."). Refusals (exit 2 unless noted): `api_keys_damaged` (20), `api_keys_unsafe`
   (20), `api_key_unknown`, `api_key_label_invalid`, `api_key_scope_invalid`,
-  `api_key_expiry_invalid` (1 to 3,650 days), `api_key_limit`, `api_key_output_exists`,
+  `api_key_expiry_invalid` (1 to 3,650 days), `api_key_limit` (256 unrevoked keys; revoking one
+  frees its slot, and a full file drops its oldest revoked record), `api_key_output_exists`,
   `trusted_console_required`, `api_key_not_shown` (the key was revoked) and
   `api_key_output_failed` (20; the key was revoked).
 - `finishup service rest run --listen HOST:PORT (--tls-cert F --tls-key F | --behind-proxy)
@@ -15354,7 +15770,7 @@ for checks of earlier work; a recovered job whose check change was erased ends w
 
 | Record | Location | Fields |
 |---|---|---|
-| `yoetz.server-code-copy/1` | `<target root>/config/code-copy.json` (client, remote targets) | `schema`, `target_id` and `repositories`: per repository `repository` (the hold's repository key), `level` (`L1` or `null`; never more than the consent), `exclude` (patterns) and `allow` (`[path, sha256:<hex>]` of exact bytes); at most 256 repositories and 256 entries each, 1 MiB. Owner-only canonical JSON, read fail-closed (a bad record refuses every export); written under the registry lock by `server code exclude`, `allow add`, `allow remove` and `level`; never sent to a server. |
+| `yoetz.server-code-copy/1` | `<target root>/config/code-copy.json` (client, remote targets) | `schema`, `target_id` and `repositories`: per repository `repository` (the hold's repository key), `level` (`L1` or `null`; never more than the consent), `exclude` (patterns) and `allow` (`[path, sha256:<hex>]` of exact bytes); at most 256 repositories and 256 entries each, 1 MiB. Owner-only canonical JSON, read fail-closed (a bad record refuses every export); written under the registry lock by `server code exclude`, `allow add`, `allow remove` and `level`; never sent to a server. Those commands refuse a record that cannot be read as `code_copy_settings_invalid` or `code_copy_settings_unsafe` and a change past a limit as `code_copy_settings_limit`, each with fixed local-repair text, never a server fault. |
 | `yoetz.code-export/1` | `<target root>/state/code-export/<digest of the repository key>/export.json` (client) | `schema`, `export_id`, `next_ref`, `sent` (the snapshots sent), `root` (the repository's folder, recorded once the gate passed; a record without it is unreadable to `forget --all`), `bases` and, once a sync recorded it, `claim` (`{identity_kind, digest, worktree}`: the claim the copy was sent under, which names it for `list --all` and `forget --all` once the folder is gone; absent in a record written before #1357); beside FinishUP-owned git loose objects, never the repository's own `.git`. Removed by `server code forget`. |
 | `yoetz.code-copy/1` | `<state>/code-copies/copies/<copy key>/copy.json` (server) | `schema`, `copy_key`, `copy_id`, `principal` and `repository` (digests only), `created_at`, `last_sync_at`, `retention` (`{kind, days}`), `snapshots` (at most 64), `pins`, `stored_bytes`, `objects` and `wrap`; beside it `objects/`, `snapshots/<snapshot>.enc` and `index.enc`, each an AES-256-GCM frame. Written last at every commit. `pins`: per task id `{snapshot, synced_at, served, stale, reads, fenced}` (ids and counts only), buffered and written at each sync, account, forget and expiry and every 32 reads. |
 | `yoetz.code-copy-wrap/1` | the `wrap` member of `copy.json` (server) | `schema`, `algorithm` (`aes-256-kw-rfc3394`), `key_slot`, `wrapped`: the copy's data key wrapped under a key-encryption key the vault's installation MAC derives per copy (domain `yoetz/code-copy-kek/v1`), never stored; a locked vault reads and admits nothing. |
@@ -15398,7 +15814,10 @@ short id with `export_record_unreadable`, `repository_folder_unknown`, `reposito
 repositories: [{position, copy, folder, outcome: forgotten|not_forgotten|never_sent, reason,
 answer}], forgotten, not_forgotten}`. A record that kept its `claim` is named by it, whatever became of its
 folder (#1357); a held or kept repository whose record names nothing sent there (no snapshot, no
-claim) is asked nothing and reported `outcome: never_sent` (no miss, not counted as forgotten).
+claim) is asked nothing and reported `outcome: never_sent` (no miss, not counted as forgotten). Its text
+says every copy is forgotten there, and adds what the tasks that read a copy lose, only when one was
+actually forgotten; a run of `never_sent` records alone ends by saying nothing was sent, asked or
+deleted (the same lines serve `server remove --forget-copies`).
 `list --all` reads the same records the same way and exits 20 with `code_copy_list_incomplete`
 when any one is `not_listed`; a `never_sent` one is no miss either, so it alone exits 0; its JSON is `{action: status_all, repositories: [{position, copy,
 folder, outcome: listed|not_listed|never_sent, reason, answer}], listed, not_listed}`. `list` and `forget` of a held or kept repository with no export record print

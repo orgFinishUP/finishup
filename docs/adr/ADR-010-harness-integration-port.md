@@ -469,6 +469,10 @@ Hook ingress and every consent/control lifecycle entry point derive that commitm
 workspace canonicalizer: the nearest safe Git root for a Git subdirectory, or the exact safe
 directory for non-Git workspaces. Authority never searches ancestor commitments. Pre-existing
 exact-subdirectory grants remain non-authorizing until an operator explicitly regrants them.
+The observation key behind every workspace and session commitment is created once, only when no
+key file exists, and never rewritten: a key file that exists but cannot be read or is invalid is a
+typed `STORAGE_UNSAFE` failure, never a reason to mint a replacement that would orphan every
+consent, binding, and outbox record keyed by the old commitments (issue #1390).
 
 Hook `PostToolUse` and a completed session-stream tool record (rollout `function_call_output`,
 historically exec-JSONL `item.completed`) for one host call normalize before materialization to
@@ -501,7 +505,9 @@ Approved checks never execute inside the hook RPC budget. A generation-fenced
 `ObservationVerificationSupervisor` owned by the ready application lifecycle drains pending jobs:
 one job runs per workspace through the enforcing sandbox, newer pending state coalesces older
 pending work, abandoned generation leases recover after restart, and a result becomes current only
-if post-run state still matches. Sandbox absence is an explicit unavailable result, never a pass.
+if post-run state still matches. Returning to a state whose work was superseded, or whose result
+went non-current, re-arms that state's job as the latest work and its new result replaces the
+earlier one. Sandbox absence is an explicit unavailable result, never a pass.
 Bundle migration `0004` owns durable inspection snapshots, workspace→FinishUP-session routes, and
 session-scoped current advice; migration `0003` is immutable. Local advice consumes this
 evidence offline and materializes through existing `finding_recorded`; ordinary

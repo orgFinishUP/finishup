@@ -459,7 +459,13 @@ LEDGER: Final[tuple[Crossing, ...]] = (
     # finishup.cli.hooks
     _c("cli.hooks", "adapters.integrations.observation_local", "_local_pending_rows", 1, "to_rpc"),
     # finishup.cli.host_connection
-    _c("cli.host_connection", "service.elevated_bootstrap", "<module>", 1, "to_rpc"),
+    _c(
+        "cli.host_connection",
+        "service.elevated_bootstrap",
+        "_elevated_bootstrap_error",
+        1,
+        "to_rpc",
+    ),
     _c(
         "cli.host_connection",
         "service.elevated_bootstrap",

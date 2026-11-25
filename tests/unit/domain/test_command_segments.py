@@ -9,6 +9,7 @@ from finishup.domain.command_segments import (
     command_segment_commitments,
     command_segments,
     requested_command_shape,
+    segment_reads_arguments_as_data,
 )
 from finishup.domain.observation import normalize_observed_command, observed_command_commitment
 from finishup.kernel.observed_failures import (
@@ -308,6 +309,66 @@ def test_a_chain_whose_earlier_segments_return_control_still_certifies(command: 
     assert segment_certification_commitment(pytest_q) in listed
 
 
+# A shell given the noexec flag (``-n``) reads its script without running it and still exits zero.
+_NOEXEC_SHELLS = [
+    "bash -nc 'pytest -q'",
+    "bash -cn 'pytest -q'",
+    "bash -lnc 'pytest -q'",
+    "sh -nc 'pytest -q'",
+    "/bin/bash -nc 'pytest -q'",
+    "bash -n <<'EOF'\npytest -q\nEOF",
+    "bash -n -s <<'EOF'\npytest -q\nEOF",
+]
+
+
+@pytest.mark.parametrize("command", _NOEXEC_SHELLS)
+def test_a_noexec_shell_never_lists_or_certifies_the_command_it_only_reads(command: str) -> None:
+    from finishup.domain.command_segments import segment_certification_commitment
+    from finishup.kernel.observed_failures import success_certified_identities
+
+    pytest_q = observed_command_commitment(_KEY, "pytest -q")
+    normalized = normalize_observed_command(command)
+    assert normalized is not None
+    assert observed_command_commitment(_KEY, normalized) != pytest_q
+    committed = command_segment_commitments(_KEY, command)
+    assert committed is not None
+    listed = set(committed[0])
+    assert pytest_q not in listed
+    assert segment_certification_commitment(pytest_q) not in listed
+    field = observed_command_field(
+        observed_command_commitment(_KEY, normalized), committed[0], committed[1]
+    )
+    assert pytest_q not in success_certified_identities(field)
+
+
+@pytest.mark.parametrize("argv", [["bash", "-nc", "pytest -q"], ["/bin/sh", "-cn", "pytest -q"]])
+def test_a_noexec_host_shell_wrapper_is_not_stripped_from_the_command_identity(
+    argv: list[str],
+) -> None:
+    assert normalize_observed_command(argv) != "pytest -q"
+
+
+@pytest.mark.parametrize("argv", [["bash", "-nc", "pytest -q"], ["/bin/sh", "-cn", "pytest -q"]])
+def test_a_noexec_wrapper_is_a_wrapper_only_to_a_reader_of_what_it_could_do(
+    argv: list[str],
+) -> None:
+    from finishup.domain.command_segments import wrapped_shell_argument
+
+    assert wrapped_shell_argument(argv) == "pytest -q"
+    assert wrapped_shell_argument(argv, ran=True) is None
+    runs = [argv[0], argv[1].replace("n", ""), argv[2]]
+    assert wrapped_shell_argument(runs, ran=True) == "pytest -q"
+
+
+@pytest.mark.parametrize(
+    "command", ["bash -lc 'pytest -q'", "bash -ec 'pytest -q'", "bash <<'EOF'\npytest -q\nEOF"]
+)
+def test_a_shell_that_runs_its_script_still_lists_the_command(command: str) -> None:
+    committed = command_segment_commitments(_KEY, command)
+    assert committed is not None
+    assert observed_command_commitment(_KEY, "pytest -q") in set(committed[0])
+
+
 @pytest.mark.parametrize(
     "command",
     ["exec true && pytest -q", "source .venv/bin/activate && pytest -q", "{exit,0} && pytest -q"],
@@ -324,3 +385,48 @@ def test_a_planned_command_reads_its_composition_from_separators_alone(command: 
     assert observed.composition == "masked"
     assert planned.composition == "and_chain"
     assert planned.segments == observed.segments
+
+
+@pytest.mark.parametrize(
+    "segment",
+    [
+        "echo 'a; b'",
+        "grep -E 'a|b' notes.txt",
+        "curl 'https://example.test/?a=1&b=2' > out.json",
+        "sed 's/a|b/c/' notes.txt",
+        "git commit -m 'a; b'",
+        "git -C /repo commit -am 'a | b'",
+        "git commit -m 'Fixes #12; more'",
+    ],
+)
+def test_a_plain_call_of_a_known_data_program_reads_its_arguments_as_data(segment: str) -> None:
+    assert segment_reads_arguments_as_data(segment) is True
+
+
+@pytest.mark.parametrize(
+    "segment",
+    [
+        # A program that may run an argument as shell text or as a command.
+        "fish -c 'a; b'",
+        "$SHELL -c 'a; b'",
+        "git rebase -x 'a; b' main",
+        "git -c core.editor='sh -c \"a; b\"' commit",
+        "find . -exec pytest {} \\;",
+        "python -c 'a; b'",
+        # A known program that is not run as itself, or in a form that runs something.
+        "./echo 'a; b'",
+        "/usr/bin/git commit -m 'a; b'",
+        "PATH=. grep 'a|b' f",
+        "timeout 5 grep 'a|b' f",
+        "rg --pre './run; true' needle",
+        "sed 's/a/b/e' f",
+        "printf -v PATH 'a; b'",
+        # A ``#`` outside quotes can start a comment the splitter read on as words.
+        "echo x #'a; b'",
+        # Words that cannot be read.
+        "echo 'unterminated",
+        "",
+    ],
+)
+def test_any_other_segment_may_run_its_arguments(segment: str) -> None:
+    assert segment_reads_arguments_as_data(segment) is False

@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import subprocess
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +14,22 @@ import pytest
 
 import finishup.adapters.git_change_capture as capture_module
 from finishup.adapters.git_change_capture import GitChangeCaptureAdapter
+from finishup.application.semantic_case import (
+    _auto_supply_refusal,  # pyright: ignore[reportPrivateUsage]
+)
+from finishup.domain.events import (
+    ActionKind,
+    ActionRecordedPayload,
+    DecisionRecordedPayload,
+    encode_payload,
+)
+from finishup.domain.values import action_id, actor_id, event_id
+from finishup.kernel.projections import (
+    DecisionProjectionRecord,
+    ProjectionRecord,
+    ProjectionState,
+    empty_projection_state,
+)
 from finishup.kernel.test_edit_visibility import check_change_header_entries, preexisting_test_edits
 from finishup.ports.change_capture import (
     ChangeCaptureUnavailable,
@@ -24,6 +42,7 @@ from finishup.ports.change_capture import (
     encode_task_change_base,
     metadata_path_representable,
 )
+from finishup.protocol.canonical import canonical_digest
 
 _EMPTY_SHA1_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 
@@ -223,6 +242,150 @@ def test_real_capture_marks_a_git_rename_for_structural_test_accounting(
     assert [(entry.status, entry.original_path, entry.path) for entry in metadata.entries] == [
         ("R", "tests/test_existing.py", "tests/test_renamed.py")
     ]
+
+
+def test_header_lists_binary_files_by_their_bare_paths(tmp_path: Path) -> None:
+    """A binary file's ``(binary)`` count, and any note after it, is not part of its path."""
+
+    repository = _repository(tmp_path)
+    for name in ("tests/fixtures/edited.bin", "tests/fixtures/gone.bin", "tests/old.bin"):
+        (repository / name).parent.mkdir(parents=True, exist_ok=True)
+        (repository / name).write_bytes(b"\x89PNG\0\0" + name.encode() * 40)
+    (repository / "dist").mkdir()
+    (repository / "dist/model.bin").write_bytes(b"\0old-model")
+    _git(repository, "add", "--", "tests", "dist/model.bin")
+    _commit(repository, "add binary files")
+    adapter = GitChangeCaptureAdapter()
+    base = adapter.read_task_base(os.fspath(repository))
+    (repository / "tests/fixtures/edited.bin").write_bytes(b"\x89PNG\0\0edited")
+    (repository / "tests/fixtures/gone.bin").unlink()
+    _git(repository, "mv", "--", "tests/old.bin", "tests/new.bin")
+    (repository / "dist/model.bin").write_bytes(b"\0new-model")
+
+    capture = adapter.capture(os.fspath(repository), base)
+    metadata = adapter.capture_metadata(os.fspath(repository), base)
+
+    text = _text(capture)
+    assert "  M tests/fixtures/edited.bin (binary)\n" in text
+    assert "  D tests/fixtures/gone.bin (binary)\n" in text
+    assert "  M dist/model.bin (binary) generated, build or minified output" in text
+    assert sorted(check_change_header_entries(capture)) == [
+        ("D", "tests/fixtures/gone.bin"),
+        ("M", "dist/model.bin"),
+        ("M", "tests/fixtures/edited.bin"),
+        ("R", "tests/new.bin"),
+    ]
+    assert {path for _, path in check_change_header_entries(capture)} == {
+        entry.path for entry in metadata.entries
+    }
+
+
+def test_a_verifier_naming_a_file_the_header_left_unshown_is_still_withheld(
+    tmp_path: Path,
+) -> None:
+    """The counts and notes after a not-shown file's path do not hide it from the refusal."""
+
+    repository = _repository(tmp_path)
+    (repository / "data").mkdir()
+    (repository / "data/model.bin").write_bytes(b"\0" * (9 * 1024 * 1024))
+    _git(repository, "add", "--", "data/model.bin")
+    _commit(repository, "add model")
+    adapter = GitChangeCaptureAdapter()
+    base = adapter.read_task_base(os.fspath(repository))
+    (repository / "data/model.bin").write_bytes(b"\1" * (9 * 1024 * 1024))
+    (repository / "data/huge.txt").write_text("x" * 300_000 + "\n", encoding="utf-8")
+
+    capture = adapter.capture(os.fspath(repository), base)
+
+    text = _text(capture)
+    assert "  M data/model.bin (binary) not shown: too large for this capture\n" in text
+    assert "  A data/huge.txt untracked; not shown: too large for this capture\n" in text
+    identity = "omitted:hmac-sha256:" + "a" * 64
+    for command in ("pytest data/model.bin", "pytest data/huge.txt"):
+        assert (
+            _auto_supply_refusal(
+                identity,
+                b"1 passed",
+                workspace_root=os.fspath(repository),
+                check_time_change=capture,
+                captured_command=command,
+                captured_identity=identity,
+            )
+            == "withheld_by_policy"
+        ), command
+    assert (
+        _auto_supply_refusal(
+            identity,
+            b"1 passed",
+            workspace_root=os.fspath(repository),
+            check_time_change=capture,
+            captured_command="pytest selectors.ts",
+            captured_identity=identity,
+        )
+        is None
+    )
+
+
+def _binary_fixture_edit_projection(path: str) -> ProjectionState:
+    edit = ActionRecordedPayload(
+        action_id=action_id("act_10000000-0000-4000-8000-000000000001"),
+        action_kind=ActionKind.EDIT,
+        description="Regenerate the golden fixture",
+        attempted_items=(path,),
+    )
+    decision = DecisionRecordedPayload(
+        statement="finishup:test-change:act_10000000-0000-4000-8000-000000000001:sha256:"
+        + hashlib.sha256(path.encode()).hexdigest(),
+        rationale="The golden fixture had to be regenerated.",
+        authority=actor_id("human"),
+    )
+    decision_record = DecisionProjectionRecord(
+        payload=decision,
+        payload_digest=canonical_digest(encode_payload(decision)),
+        redacted=False,
+        source_event_id=event_id("evt_10000000-0000-4000-8000-000000000002"),
+        source_frontier=2,
+    )
+    return replace(
+        empty_projection_state(),
+        frontier=2,
+        head_digest="sha256:" + "a" * 64,
+        actions={
+            edit.action_id: ProjectionRecord(
+                payload=edit,
+                payload_digest=canonical_digest(encode_payload(edit)),
+                redacted=False,
+                source_event_id=event_id("evt_10000000-0000-4000-8000-000000000001"),
+                source_frontier=1,
+            )
+        },
+        decisions={decision_record.source_event_id: decision_record},
+    )
+
+
+@pytest.mark.parametrize("deleted", (False, True), ids=("modified", "deleted"))
+def test_marker_clears_an_edit_of_a_binary_test_fixture(tmp_path: Path, deleted: bool) -> None:
+    repository = _repository(tmp_path)
+    fixture = repository / "tests/fixtures/golden.bin"
+    fixture.parent.mkdir(parents=True)
+    fixture.write_bytes(b"\x89PNG\0\0old")
+    _git(repository, "add", "--", "tests/fixtures/golden.bin")
+    _commit(repository, "add golden fixture")
+    adapter = GitChangeCaptureAdapter()
+    base = adapter.read_task_base(os.fspath(repository))
+    if deleted:
+        fixture.unlink()
+    else:
+        fixture.write_bytes(b"\x89PNG\0\0new")
+
+    capture = adapter.capture(os.fspath(repository), base)
+    facts = preexisting_test_edits(
+        capture, _binary_fixture_edit_projection("tests/fixtures/golden.bin")
+    )
+
+    assert (facts.deleted, facts.modified) == ((1, 0) if deleted else (0, 1))
+    assert facts.unjustified == 0
+    assert "preexisting_test_edit_unjustified" not in facts.gaps
 
 
 def test_without_a_recorded_base_the_change_is_against_head_and_says_so(tmp_path: Path) -> None:

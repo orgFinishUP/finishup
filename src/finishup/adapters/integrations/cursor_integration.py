@@ -899,6 +899,33 @@ def installed_cursor_startup_mode(
     return "required" if b" hooks startup-gate --host cursor " in hooks else "optional"
 
 
+def installed_cursor_observation_profile(
+    target: CursorPluginTarget,
+) -> Literal["structural", "ordinary"] | None:
+    """The observation profile of marker-verified installed bytes, if it can be verified.
+
+    Like the startup mode, a re-render that names no profile keeps the installed one, so a plain
+    connection never trades an owner's ordinary hooks for structural ones. ``None`` when the tree
+    is unverifiable; an absent tree is ``"structural"``, the default for a new installation.
+    """
+    base, _identity = _target_path(target)
+    root = base / CURSOR_PLUGIN_RELATIVE_ROOT
+    if not root.exists() and not root.is_symlink():
+        legacy = base / CURSOR_LEGACY_PLUGIN_RELATIVE_ROOT
+        if _inspect_legacy(base)[0] == "owned":
+            root = legacy
+    if root.is_symlink():
+        return None
+    if not root.exists():
+        return "structural"
+    files = _safe_tree(root)
+    if not _valid_marker(files)[0]:
+        return None
+    hooks = files.get("hooks/hooks.json", b"")
+    flag = f" --observation-profile {shlex.quote(CURSOR_ORDINARY_OBSERVATION_PROFILE_ID)} "
+    return "ordinary" if flag.encode() in hooks else "structural"
+
+
 def render_cursor_plugin(
     format_profile: PluginFormatProfile,
     *,
@@ -1042,7 +1069,17 @@ def _ensure_private_path(path: Path) -> None:
 
 def _safe_tree(root: Path) -> dict[str, bytes]:
     result: dict[str, bytes] = {}
-    for path in sorted(root.rglob("*"), key=lambda value: value.as_posix().encode("utf-8")):
+    # A name that is not valid UTF-8 (possible on Linux) cannot be named in a digest, so the
+    # tree is refused as unsafe rather than letting a codec error escape the closed reasons.
+    paths = sorted(
+        root.rglob("*"),
+        key=lambda value: value.as_posix().encode("utf-8", "surrogateescape"),
+    )
+    for path in paths:
+        try:
+            path.as_posix().encode("utf-8")
+        except UnicodeEncodeError:
+            raise _error(PluginArtifactReason.TARGET_UNSAFE) from None
         if path.is_symlink():
             raise _error(PluginArtifactReason.TARGET_UNSAFE)
         if path.is_dir():
@@ -1063,7 +1100,7 @@ def _tree_digest(files: Mapping[str, bytes]) -> str:
         {
             "files": [
                 {"relative_path": path, "sha256": _sha(data), "size": len(data)}
-                for path, data in sorted(files.items(), key=lambda item: item[0].encode("ascii"))
+                for path, data in sorted(files.items(), key=lambda item: item[0].encode("utf-8"))
             ]
         }
     )
@@ -2271,7 +2308,7 @@ def _config_entries(
     try:
         if path.is_symlink() or not path.is_file() or path.stat().st_size > _MAX_FILE_BYTES:
             return None, None, False
-        # Host-owned and only observed here: tolerate host decimals (#1278).
+        # Host-owned and only observed here: tolerate host decimals and strings (#1278, #1389).
         parsed = parse_host_config_json(path.read_bytes())
     except (OSError, ProtocolValueError, UnicodeError):
         return None, None, False

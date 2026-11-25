@@ -14,6 +14,7 @@ from finishup.adapters.approved_checks import (
     ApprovedCheckApproval,
     approval_commitment,
 )
+from finishup.config.toml_text import load_toml_text
 from finishup.legacy_names import LEGACY_REPOSITORY_DIRECTORY, REPOSITORY_DIRECTORY
 from finishup.protocol.errors import ProtocolValueError
 
@@ -39,6 +40,9 @@ CHECK_POLICY_PATH: Final = Path(REPOSITORY_DIRECTORY) / "checks.toml"
 LEGACY_CHECK_POLICY_PATH: Final = Path(LEGACY_REPOSITORY_DIRECTORY) / "checks.toml"
 CHECK_POLICY_PATHS: Final = (CHECK_POLICY_PATH, LEGACY_CHECK_POLICY_PATH)
 _MAX_POLICY_BYTES: Final = 256 * 1024
+# The approval model's timeout bounds, checked on the raw TOML number before any conversion.
+_MIN_TIMEOUT_SECONDS: Final = 0.1
+_MAX_TIMEOUT_SECONDS: Final = 300
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,7 +104,7 @@ def parse_observation_check_policy(raw: bytes) -> ObservationCheckPolicy:
 
     digest = raw_policy_digest(raw)
     try:
-        document = tomllib.loads(raw.decode("utf-8"))
+        document = load_toml_text(raw.decode("utf-8"))
     except (UnicodeError, tomllib.TOMLDecodeError) as exc:
         raise ProtocolValueError("invalid_approved_check_policy") from exc
     if set(document) != {"format", "checks"} or document.get("format") != CHECK_POLICY_FORMAT:
@@ -130,17 +134,25 @@ def parse_observation_check_policy(raw: bytes) -> ObservationCheckPolicy:
             or type(network) is not bool
         ):
             raise ProtocolValueError("invalid_approved_check_policy")
+        timeout_number = cast(int | float, timeout_raw)
+        # Range-check before converting: an integer too large for a float would raise
+        # OverflowError, and NaN fails every comparison, so both stay policy faults.
+        if not _MIN_TIMEOUT_SECONDS <= timeout_number <= _MAX_TIMEOUT_SECONDS:
+            raise ProtocolValueError("invalid_approved_check_policy")
         argv = tuple(cast(str, item) for item in argv_values)
-        timeout_seconds = float(cast(int | float, timeout_raw))
-        checks.append(
-            ApprovedCheckApproval(
+        try:
+            approval = ApprovedCheckApproval(
                 approval_id=check_id,
                 argv=argv,
                 allow_network=network,
-                timeout_seconds=timeout_seconds,
+                timeout_seconds=float(timeout_number),
                 approval_commitment=approval_commitment(check_id, argv, allow_network=network),
             )
-        )
+        except ProtocolValueError as exc:
+            # A check the approval model refuses (argv grammar, id length) is a malformed
+            # policy; callers rely on the one invalid-policy reason for every policy fault.
+            raise ProtocolValueError("invalid_approved_check_policy") from exc
+        checks.append(approval)
     checks.sort(key=lambda item: item.approval_id.encode())
     return ObservationCheckPolicy(digest, tuple(checks))
 

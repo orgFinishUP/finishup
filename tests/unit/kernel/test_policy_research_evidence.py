@@ -33,7 +33,7 @@ from finishup.domain.events import (
     ResultOutcome,
     ResultRecordedPayload,
 )
-from finishup.domain.findings import Finding, FindingKind, FindingOrigin
+from finishup.domain.findings import FINDING_KIND_TRAITS, Finding, FindingKind, FindingOrigin
 from finishup.domain.values import SubjectStateRef, object_id, timestamp_from_string
 from finishup.kernel.deterministic_checks import case_coverage, run_deterministic_policies
 from finishup.kernel.policies.research_evidence import RESEARCH_EVIDENCE_POLICY_PACK
@@ -445,6 +445,80 @@ def test_questionable_finding_rejection_and_supported_nontrigger() -> None:
         extra_refs=(evt(99),),
     )
     assert FindingKind.QUESTIONABLE_FINDING_REJECTION not in _kinds(near)
+
+
+def test_rejections_of_findings_sharing_a_subject_yield_one_finding() -> None:
+    """A claim citing evidence captured at another tree draws both research rules on one subject.
+    Rejecting both findings without evidence must not make the pack fail: the rejection rule
+    reports that subject once, naming both rejected findings, and the claim's own findings stand."""
+
+    evidence = _evidence(SubjectStateRef(tree_digest=_DIGEST_A))
+    claim = ClaimRecordedPayload(
+        claim_id=clm(1),
+        claim_kind=ClaimKind.MATERIAL,
+        statement="New state",
+        supporting_refs=(evd(1),),
+        subject_state=SubjectStateRef(tree_digest=_DIGEST_B),
+    )
+    evidence_rows = {evd(1): evidence_record(evidence, 1)}
+    claims = {clm(1): record(claim, 2)}
+    produced = run_deterministic_policies(
+        make_case(evidence=evidence_rows, claims=claims), RESEARCH_EVIDENCE_POLICY_PACK
+    ).assessments
+    subjects = {item.candidate.kind: item.candidate.subject_refs for item in produced}
+    shared = subjects[FindingKind.EVIDENCE_DOES_NOT_SUPPORT_CLAIM]
+    assert subjects[FindingKind.DIFF_DOES_NOT_MATCH_ACCOUNT] == shared
+
+    def _local(number: int, kind: FindingKind) -> Finding:
+        return Finding(
+            finding_id=fnd(number),
+            kind=kind,
+            origin=FindingOrigin.DETERMINISTIC,
+            priority=FINDING_KIND_TRAITS[kind][0],
+            summary="A local finding.",
+            detail="Resolve it.",
+            subject_refs=shared,
+            policy_id="research-evidence",
+            policy_version="0.2.0",
+            subject_frontier=FRONTIER,
+            coverage=BASE_COVERAGE,
+            provenance=None,
+        )
+
+    def _rejected(number: int) -> ResponseRecordedPayload:
+        return ResponseRecordedPayload(
+            finding_id=fnd(number),
+            finding_frontier=FRONTIER,
+            disposition=ResponseDisposition.REJECTED,
+            reason="Rejected",
+        )
+
+    case = make_case(
+        evidence=evidence_rows,
+        claims=claims,
+        findings={
+            fnd(1): record(_local(1, FindingKind.EVIDENCE_DOES_NOT_SUPPORT_CLAIM), 3),
+            fnd(2): record(_local(2, FindingKind.DIFF_DOES_NOT_MATCH_ACCOUNT), 4),
+        },
+        responses={fnd(1): record(_rejected(1), 5), fnd(2): record(_rejected(2), 6)},
+    )
+
+    assessments = run_deterministic_policies(case, RESEARCH_EVIDENCE_POLICY_PACK).assessments
+    kinds = [item.candidate.kind for item in assessments]
+    assert FindingKind.EVIDENCE_DOES_NOT_SUPPORT_CLAIM in kinds
+    assert FindingKind.DIFF_DOES_NOT_MATCH_ACCOUNT in kinds
+    rejections = [
+        item
+        for item in assessments
+        if item.candidate.kind is FindingKind.QUESTIONABLE_FINDING_REJECTION
+    ]
+    assert len(rejections) == 1
+    assert rejections[0].candidate.subject_refs == shared
+    events = {case.projection.responses[fnd(n)].source_event_id for n in (1, 2)}
+    (present,) = rejections[0].basis.observed_facts
+    assert set(present.subject_refs) == {fnd(1), fnd(2), *events}
+    (insufficient,) = rejections[0].basis.required_but_missing_facts
+    assert set(insufficient.subject_refs) == {fnd(1), fnd(2), *events}
 
 
 def test_provenance_dispute_does_not_trigger_rejection_penalty() -> None:

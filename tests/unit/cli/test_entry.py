@@ -204,7 +204,7 @@ def test_service_status_fast_path_preserves_silent_service_guidance(
     assert "finishup.cli.app" not in sys.modules
     assert "finishup.cli.project" not in sys.modules
     captured = capsys.readouterr()
-    assert "did not answer within 5 seconds" in captured.err
+    assert "listening but did not answer: it stayed silent for 5 seconds" in captured.err
     assert "Do not run 'finishup service run'" in captured.err
 
 

@@ -718,8 +718,10 @@ def render_work_detail(detail: WorkDetail, width: int) -> tuple[str, ...]:
             (
                 ("State", detail.item.state),
                 (
-                    "Evidence",
-                    "unknown" if detail.evidence_count is None else str(detail.evidence_count),
+                    "Open obligations",
+                    "unknown"
+                    if detail.open_obligation_count is None
+                    else str(detail.open_obligation_count),
                 ),
                 ("Open findings", str(detail.item.open_findings)),
                 ("Last check", detail.item.last_check),

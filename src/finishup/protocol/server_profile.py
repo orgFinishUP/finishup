@@ -100,6 +100,8 @@ _INSTANCE: Final = re.compile(
     r"^svc_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$", re.ASCII
 )
 _TOKEN: Final = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$", re.ASCII)
+# The contract bounds a release to 128 characters; the pattern alone admits any length.
+_RELEASE_LIMIT: Final = 128
 _MAX_REVISION: Final = 2**53 - 1
 _MAX_OPTIONS: Final = 16
 _MAX_PATTERNS: Final = 256
@@ -147,11 +149,11 @@ class ServerProfileRevision:
     profile_digest: str
 
     def __post_init__(self) -> None:
-        if type(self.issuer) is not str or not _ISSUER.match(self.issuer):
+        if type(self.issuer) is not str or not _ISSUER.fullmatch(self.issuer):
             raise ProfileError("profile_revision_invalid")
         if type(self.revision) is not int or not 1 <= self.revision <= _MAX_REVISION:
             raise ProfileError("profile_revision_invalid")
-        if type(self.profile_digest) is not str or not _SHA256.match(self.profile_digest):
+        if type(self.profile_digest) is not str or not _SHA256.fullmatch(self.profile_digest):
             raise ProfileError("profile_revision_invalid")
 
 
@@ -271,13 +273,15 @@ def _object(value: JsonValue, fields: frozenset[str]) -> Mapping[str, JsonValue]
 def _token(value: JsonValue, *, nullable: bool = False) -> str | None:
     if value is None and nullable:
         return None
-    if type(value) is not str or not _TOKEN.match(value):
+    if type(value) is not str or not _TOKEN.fullmatch(value):
         raise ProfileError("profile_member_invalid")
     return value
 
 
-def _matched(value: JsonValue, pattern: re.Pattern[str]) -> str:
-    if type(value) is not str or not pattern.match(value):
+def _matched(value: JsonValue, pattern: re.Pattern[str], *, limit: int | None = None) -> str:
+    if type(value) is not str or (limit is not None and len(value) > limit):
+        raise ProfileError("profile_member_invalid")
+    if not pattern.fullmatch(value):
         raise ProfileError("profile_member_invalid")
     return value
 
@@ -450,7 +454,7 @@ def profile_from_json(value: JsonValue | bytes) -> ServerProfile:
     if stated != computed or revision.profile_digest != computed:
         raise ProfileError("profile_digest_mismatch")
     profile = ServerProfile(
-        release=_matched(source["release"], _RELEASE),
+        release=_matched(source["release"], _RELEASE, limit=_RELEASE_LIMIT),
         schema_manifest_digest=_matched(source["schema_manifest_digest"], _SHA256),
         service_instance_id=_matched(source["service_instance_id"], _INSTANCE),
         key=_key(source["key"]),

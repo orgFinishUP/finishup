@@ -337,6 +337,11 @@ class LocalWorkspaceInspectAdapter:
         Intermediate directory and final-component symlinks are resolved only within
         the root, with a shared resolution budget of ``_MAX_SYMLINK_DEPTH``. The
         returned fd is owned by the caller; intermediate fds are closed before return.
+
+        The final open is non-blocking, so a named pipe (or a device that would wait
+        on open) returns at once and ``_read_regular_file`` refuses it as
+        ``NOT_A_FILE`` instead of waiting for a writer that may never come.
+        Non-blocking mode does not change reads from a regular file.
         """
 
         if not components:
@@ -344,6 +349,7 @@ class LocalWorkspaceInspectAdapter:
         remaining_symlinks = _MAX_SYMLINK_DEPTH
         path_components = list(components)
         base_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | os.O_NOFOLLOW
+        final_flags = base_flags | getattr(os, "O_NONBLOCK", 0)
 
         while True:
             parent_fd = root_fd
@@ -351,7 +357,7 @@ class LocalWorkspaceInspectAdapter:
             try:
                 for index, component in enumerate(path_components):
                     is_final = index == len(path_components) - 1
-                    flags = base_flags if is_final else base_flags | os.O_DIRECTORY
+                    flags = final_flags if is_final else base_flags | os.O_DIRECTORY
                     try:
                         new_fd = os.open(component, flags, dir_fd=parent_fd)
                     except OSError as exc:

@@ -48,6 +48,7 @@ from finishup.application.reviewer_loop import (
     ReviewOutcome,
     Turn,
 )
+from finishup.domain.findings import SemanticFailureClass
 from finishup.domain.privacy import (
     ApprovedLocalDisclosureCase,
     ApprovedOutboundCase,
@@ -76,12 +77,14 @@ from finishup.ports.semantic import (
     encode_reviewer_exchange,
     reviewer_exchange,
 )
+from finishup.ports.semantic_budget import LEGACY_SEMANTIC_BUDGET_PROFILE
 from finishup.protocol.canonical import (
     JsonValue,
     canonical_digest,
     canonical_encode,
     strict_json_parse,
 )
+from finishup.protocol.models import SemanticStatus
 
 pytestmark = pytest.mark.anyio
 
@@ -782,12 +785,18 @@ class _Credential:
 
 
 async def _api_evaluate(
-    route: str, history: tuple[ReviewerMessage, ...] | None, capture: _Capture, clock: _Clock
+    route: str,
+    history: tuple[ReviewerMessage, ...] | None,
+    capture: _Capture,
+    clock: _Clock,
+    request_id: str | None = None,
 ) -> tuple[SemanticResult, bytes, _Credential, OneAttemptCredentialTransport]:
     """One exchange (``None``: a one-shot case) through the real pinned SDK, offline."""
 
     profile = _api_profile(route)
     case = _case(_FIRST if history is None else history, _api_binding(profile))
+    if request_id is not None:
+        case = replace(case, request_id=request_id)
     if history is None:
         case = replace(case, payload=b'{"case":1}', media_type="application/json", byte_count=10)
     rendered = (
@@ -1033,6 +1042,34 @@ async def test_r5_truncated_answer_ends_without_another_inference() -> None:
     assert outcome.reason == "reviewer_exchange_response_content"
 
 
+async def test_responses_refusal_ends_the_review_refused_without_a_repair() -> None:
+    from openai.types.responses import Response
+
+    profile, seen = _api_profile("responses"), list[bytes]()
+    assert isinstance(profile, OpenAIProfile)
+
+    async def dispatch(payload: bytes, media_type: str, deadline: Deadline) -> SemanticResult:
+        seen.append(payload)
+        response = Response.model_validate(
+            {
+                "id": "r1", "object": "response", "created_at": 0, "model": profile.model,
+                "status": "completed", "parallel_tool_calls": False, "tool_choice": "none",
+                "tools": [], "output": [{
+                    "type": "message", "id": "m1", "role": "assistant", "status": "completed",
+                    "content": [{"type": "refusal", "refusal": "I can't help with that."}],
+                }],
+            }
+        )  # fmt: skip
+        exchange = reviewer_exchange(media_type, payload, REVIEWER_REPLY_SCHEMAS)
+        return normalize_response(
+            response, profile, policy_digest=_DIGEST, latency_ms=1, exchange=exchange
+        )
+
+    outcome = await _loop(dispatch, _Clock())
+    assert outcome.status == "incomplete" and len(seen) == 1
+    assert outcome.reason == "reviewer_exchange_refused"
+
+
 async def test_r5_codex_output_limit_gets_no_format_repair(monkeypatch: pytest.MonkeyPatch) -> None:
     runtime = _CodexRuntime(profile_for(record_for(b"c", b"h", version="0.162.1")), [_FINAL])
     usage = {
@@ -1058,6 +1095,70 @@ async def test_r5_codex_output_limit_gets_no_format_repair(monkeypatch: pytest.M
     await session.aclose()
 
 
+def _usage_event(
+    runtime: _CodexRuntime, last_output: int, total_output: int, total_input: int
+) -> dict[str, object]:
+    """The next turn's ``thread/tokenUsage/updated``: a 1,000-token request and the thread total."""
+
+    def breakdown(inputs: int, output: int) -> dict[str, int]:
+        return {
+            "inputTokens": inputs, "cachedInputTokens": 0, "cacheWriteInputTokens": 0,
+            "outputTokens": output, "reasoningOutputTokens": 0, "totalTokens": inputs + output,
+        }  # fmt: skip
+
+    usage = {"last": breakdown(1_000, last_output), "total": breakdown(total_input, total_output)}
+    turn = f"turn{len(runtime.answers)}"
+    params = {"threadId": "thr1", "turnId": turn, "tokenUsage": usage}
+    return {"method": "thread/tokenUsage/updated", "params": params}
+
+
+def _stage(result: SemanticResult) -> tuple[str, str | None]:
+    evidence = result.provenance.runtime_evidence
+    return type(result).__name__, None if evidence is None else evidence.failure_stage
+
+
+@pytest.mark.parametrize("first_reported", [True, False])
+async def test_r5_codex_continuation_is_held_to_its_own_output_limit(
+    monkeypatch: pytest.MonkeyPatch, first_reported: bool
+) -> None:
+    runtime = _CodexRuntime(
+        profile_for(record_for(b"c", b"h", version="0.162.1")), [_ACTION, _FINAL, _FINAL]
+    )
+    limit = runtime.profile.review_budget(LEGACY_SEMANTIC_BUDGET_PROFILE).output_limit
+    each = limit - 100  # every turn's own visible output fits; the thread's total does not
+    # The first turn either reports its usage or reports none, leaving the next turn's start to
+    # its own first request's snapshot (the thread's total less that request's own count).
+    runtime.extra_event = _usage_event(runtime, each, each, 1_000) if first_reported else None
+    session = ReviewerSession("review-a", _DEADLINE)
+    first = await _codex_exchange(monkeypatch, runtime, session, _FIRST, [])
+    assert _stage(first) == ("SemanticResultReply", None)
+
+    runtime.extra_event = _usage_event(runtime, each, 2 * each, 2_000)
+    second = await _codex_exchange(monkeypatch, runtime, session, _SECOND, [])
+    assert _stage(second) == ("SemanticResultReply", None)
+    assert second.provenance.sampling_params is not None
+    assert second.provenance.sampling_params.max_output_tokens == limit
+    await session.aclose()
+
+
+async def test_r5_codex_continuation_over_its_own_output_limit_is_oversize(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _CodexRuntime(
+        profile_for(record_for(b"c", b"h", version="0.162.1")), [_ACTION, _FINAL]
+    )
+    limit = runtime.profile.review_budget(LEGACY_SEMANTIC_BUDGET_PROFILE).output_limit
+    runtime.extra_event = _usage_event(runtime, 100, 100, 1_000)
+    session = ReviewerSession("review-a", _DEADLINE)
+    assert _stage(await _codex_exchange(monkeypatch, runtime, session, _FIRST, []))[0] == (
+        "SemanticResultReply"
+    )
+    runtime.extra_event = _usage_event(runtime, limit + 1, limit + 101, 2_000)
+    second = await _codex_exchange(monkeypatch, runtime, session, _SECOND, [])
+    assert _stage(second) == ("SemanticResultInvalid", "output_oversize")
+    await session.aclose()
+
+
 @pytest.mark.parametrize("route", ["responses", "chat"])
 @pytest.mark.parametrize("mode", ["turn", "final"])
 def test_r6_rendered_digests_name_the_exchange(route: str, mode: str) -> None:
@@ -1079,6 +1180,19 @@ async def test_r6_early_failures_name_the_exchange(route: str) -> None:
     result, *_ = await _api_evaluate(route, _FIRST, _Capture(route, fail=True), _Clock())
     assert type(result) is not SemanticResultReply
     assert result.provenance.schema_digest == canonical_digest(REVIEWER_REPLY_SCHEMAS.turn)
+
+
+@pytest.mark.parametrize("route", ["responses", "chat"])
+async def test_r6_an_http_timeout_through_the_sdk_is_a_provider_timeout(route: str) -> None:
+    """The SDK wraps the HTTP timeout in its own error; it is still a timeout, not transport."""
+
+    result, *_ = await _api_evaluate(route, _FIRST, _Capture(route, fail=True), _Clock())
+    assert type(result) is SemanticResultTimeout, (
+        type(result).__name__,
+        result.provenance.failure_class,
+    )
+    assert result.provenance.status is SemanticStatus.TIMEOUT
+    assert result.provenance.failure_class is SemanticFailureClass.TIMEOUT
 
 
 async def test_r3_review_exit_closes_the_thread_when_admission_is_denied(

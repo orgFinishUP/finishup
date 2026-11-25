@@ -30,6 +30,7 @@ from pydantic_core import core_schema
 from finishup.domain.review_guidance import ReviewGuidance
 from finishup.domain.verification_coverage import VERIFICATION_EXPECTED_FROM
 from finishup.protocol.canonical import JsonValue, canonical_encode
+from finishup.protocol.deferred_build import ensure_built
 from finishup.protocol.models import MAX_REVIEW_EXCERPTS
 
 __all__ = [
@@ -7310,7 +7311,9 @@ def _add_evidence_basis_schema(definitions: dict[str, JsonValue]) -> None:
     """Typed read shape, with exact wire identities and separate omission categories (#1205)."""
     from finishup.protocol.models import StatusObligationEvidenceModel
 
-    root = cast(dict[str, JsonValue], TypeAdapter(StatusObligationEvidenceModel).json_schema())
+    root = cast(
+        dict[str, JsonValue], TypeAdapter(ensure_built(StatusObligationEvidenceModel)).json_schema()
+    )
     nested = cast(dict[str, JsonValue], root.pop("$defs", {}))
     # Every prose leaf below uses the common, category-bound omission instead of these generic
     # Pydantic definitions. BeforeValidator-backed identities need the real wire definitions too.
@@ -14819,6 +14822,20 @@ _REGISTRY: Final[tuple[_RegistryEntry, ...]] = (
             ).RestSessionContract
         ),
     ),
+    # #1172: ``finishup service diagnostics --reviewer-cache --json``.
+    _RegistryEntry(
+        "service/reviewer-cache-report-1.0.0.schema.json",
+        "reviewer-cache-report",
+        "1.0.0",
+        "request_result",
+        "service-status",
+        lambda: (
+            __import__(
+                "finishup.protocol.reviewer_cache_report_contract",
+                fromlist=["ReviewerCacheReportContract"],
+            ).ReviewerCacheReportContract
+        ),
+    ),
     # ADR-052: what a FinishUP server offers and requires (design v2 section 2.2).
     _RegistryEntry(
         "service/server-profile-1.0.0.schema.json",
@@ -15708,7 +15725,7 @@ def build_schema_documents(
         else:
             try:
                 python_type = entry.loader()
-                raw_schema = TypeAdapter(python_type).json_schema()
+                raw_schema = TypeAdapter(ensure_built(python_type)).json_schema()
             except Exception as exc:  # noqa: BLE001 - normalized into a bounded generator error
                 raise SchemaGenerationError(
                     "model_introspection_failed", entries=(entry.relative_path,)

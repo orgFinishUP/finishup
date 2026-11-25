@@ -1280,6 +1280,11 @@ class Application:
                 task, key, statement_paths, boundary, repository_privacy_context, request.request_id
             )
 
+        async def capture_base(task: TaskRuntime) -> None:
+            await self._record_task_change_base(
+                task, repository_privacy_context, request.request_id
+            )
+
         async with self._start_lock:
             # A public lifecycle append and its catalog mirror share the lineage publication
             # lock.  Parent-authorized starts take that same lock and reconcile any event that
@@ -1300,6 +1305,7 @@ class Application:
                         ),
                         input_capture=capture,
                         session_workspace_ref=session_workspace_ref,
+                        base_capture=capture_base,
                     )
             else:
                 result = await execute_start(
@@ -1312,9 +1318,9 @@ class Application:
                     ),
                     input_capture=capture,
                     session_workspace_ref=session_workspace_ref,
+                    base_capture=capture_base,
                 )
             await self._maybe_birth_implicit_repository_project(repository_privacy_context)
-            await self._record_task_change_base(result, repository_privacy_context)
             return result
 
     async def _capture_inputs(
@@ -1360,49 +1366,30 @@ class Application:
 
     async def _record_task_change_base(
         self,
-        result: StartInternalResult,
+        task: TaskRuntime,
         repository_privacy_context: RepositoryPrivacyContext | None,
+        request_id: str,
     ) -> None:
-        """Keep HEAD as the new task's change base before its creator gets the result (ADR-031).
+        """Keep HEAD as a new task's change base before its creator gets the result (ADR-031).
 
-        Only a start that created the task records a base, so the base is the repository state
-        before the task's first edit or commit. Attach and resume never record one: a base taken
+        ``execute_start`` calls this with the runtime of the task the start created, and only
+        then: a create, a parent-registered child, or a delegated child in its own bundle (never
+        the parent's session that admitted it). Attach and resume never record one: a base taken
         later would silently hide the commits made in between. Best effort; a task without a base
         still gets a check-time change, shown against HEAD with that limit disclosed.
         """
 
         port = self.change_capture
         workspace = context_workspace(repository_privacy_context)
-        if port is None or workspace is None or result.outcome not in {"created", "delegated"}:
+        if port is None or workspace is None:
             return
-        try:
-            runtime = await self.runtime.route(
-                RouteCommand(
-                    result.session_id,
-                    result.writer_id,
-                    RouteAccess.WRITE,
-                    frozenset({RuntimeCapability.WRITE}),
-                )
-            )
-        except Exception as exc:
-            # The start itself succeeded; a missing base must never turn it into a failure.
-            record_unexpected_exception_without_raising(
-                exc,
-                component="start",
-                operation="task_change_base_route_failed",
-                request_id=result.request_id,
-            )
-            return
-        try:
-            await record_task_change_base(
-                runtime=runtime,
-                port=port,
-                workspace=workspace,
-                clock=self.clock,
-                request_id=result.request_id,
-            )
-        finally:
-            await self.runtime.release(runtime)
+        await record_task_change_base(
+            runtime=task,
+            port=port,
+            workspace=workspace,
+            clock=self.clock,
+            request_id=request_id,
+        )
 
     async def _maybe_birth_implicit_repository_project(
         self, repository_privacy_context: RepositoryPrivacyContext | None

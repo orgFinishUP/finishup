@@ -109,7 +109,10 @@ finish; if they do not, it offers to finish as local only.
 
 If an MCP entry named `finishup` already exists and FinishUP does not own it, setup stops there. You can
 inspect it, continue locally, or read manual resolution steps. **There is no force-replace option
-and there will not be one.**
+and there will not be one.** Continuing locally during first-run setup finishes it as local only,
+the same way as choosing local only: storage is set up, local checks only is recorded in the
+privacy policy, and setup is marked complete only once that is recorded. From `/connect` on an
+installation that is already set up, continuing locally changes nothing that was already set up.
 
 ## Commands
 
@@ -137,8 +140,10 @@ Type `/` to open the filtered command list.
 
 ### `/status`
 
-Reports each readiness layer separately, because they can and do disagree. `D` opens the full
-list:
+Reports each readiness layer separately, because they can and do disagree. A layer whose fact
+could not be read is shown as unknown, never as not configured: when the agent's connection status
+cannot be read, MCP registered, MCP verified, and Guidance installed all say unknown. `D` opens the
+full list:
 
 ```text
 Harness detected                    Local service reachable
@@ -267,8 +272,9 @@ readiness.
 
 ### `/work`, `/check`, `/receipt`
 
-`/work` opens a task by the title the agent used and shows its claims, evidence count, checks,
-coverage, findings, limitations, and whether a receipt is available. **FinishUP has no browsable
+`/work` opens a task by the title the agent used and shows its claims, how many promised items
+are still open (or "unknown" when the service did not say), checks, coverage, findings,
+limitations, and whether a receipt is available. **FinishUP has no browsable
 task index** — the local service exposes no task-listing operation and this interface does not
 invent one — so tasks are reached by name.
 

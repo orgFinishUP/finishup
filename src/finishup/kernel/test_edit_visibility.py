@@ -47,11 +47,14 @@ __all__ = [
     "TEST_CHANGE_MARKER",
     "PreExistingTestEdits",
     "check_change_header_entries",
+    "check_change_header_line",
     "check_change_sections",
     "preexisting_test_edits",
 ]
 
 _HEADER_LINE: Final = re.compile(r"^  ([A-Z?]) (.+)$")
+# Where a listed file's counts begin: `` (+N -M)``, or `` (binary)`` alone or before a note.
+_HEADER_COUNTS: Final = re.compile(r" \((?:\+[0-9-]|binary\)(?: |$))")
 _SKIP_MARKER: Final = re.compile(
     rb"(?:pytest\.skip|pytest\.mark\.skip|unittest\.skip|"
     rb"(?:it|test|describe|suite|context)\.skip\b|"
@@ -403,6 +406,53 @@ def _diff_paths_with_skip_markers(capture: CheckChangeCapture) -> frozenset[str]
     return frozenset(paths)
 
 
+def check_change_header_line(line: str) -> tuple[str, str | None] | None:
+    """``(status, path)`` for one ``Files:`` line of the check-time change header.
+
+    ``None`` when the line lists no file; ``path`` is ``None`` for a listed name that cannot be
+    decoded. The counts and fixed notes the capture appends are never part of ``path``. In
+    process only.
+    """
+
+    match = _HEADER_LINE.match(line)
+    if match is None:
+        return None
+    status, remainder = match.groups()
+    # Header counts and fixed notes are service text.  A quoted Git path may itself contain
+    # spaces or ``("`; find its closing quote before looking for annotations.  This is only
+    # used in process and is never returned.
+    if remainder.startswith('"'):
+        escaped = False
+        closing = None
+        for position, character in enumerate(remainder[1:], start=1):
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == '"':
+                closing = position
+                break
+        path = remainder if closing is None else remainder[: closing + 1]
+    else:
+        # The counts end the path: ``(+N -M)`` for text, the fixed ``(binary)`` for a file Git
+        # counts as binary.  Git quotes no plain space, so an unquoted path that itself holds
+        # `` (+1`` or `` (binary) `` is cut there, as it always was for the counts.
+        count = _HEADER_COUNTS.search(remainder)
+        path = remainder if count is None else remainder[: count.start()]
+        # The first fixed note ends the path (``x untracked; not shown: ...``, and the tb4n5
+        # note on a file ranked last as generated output).
+        markers = [
+            marker
+            for note in (" not shown:", " untracked", " generated, build or minified output")
+            if (marker := path.find(note)) >= 0
+        ]
+        if markers:
+            path = path[: min(markers)]
+    if not path:
+        return None
+    return status, _decode_git_path(path)
+
+
 def _header_entries(capture: CheckChangeCapture) -> tuple[tuple[str, str | None], ...]:
     """Return ``(status, path)`` from the bounded header only."""
 
@@ -420,39 +470,9 @@ def _header_entries(capture: CheckChangeCapture) -> tuple[tuple[str, str | None]
             break
         if not in_files:
             continue
-        match = _HEADER_LINE.match(line)
-        if match is None:
-            continue
-        status, remainder = match.groups()
-        # Header counts and fixed notes are service text.  A quoted Git path may itself contain
-        # spaces or ``("`; find its closing quote before looking for annotations.  This is only
-        # used in process and is never returned.
-        if remainder.startswith('"'):
-            escaped = False
-            closing = None
-            for position, character in enumerate(remainder[1:], start=1):
-                if escaped:
-                    escaped = False
-                elif character == "\\":
-                    escaped = True
-                elif character == '"':
-                    closing = position
-                    break
-            path = remainder if closing is None else remainder[: closing + 1]
-        else:
-            count = re.search(r" \(\+[0-9-]", remainder)
-            path = remainder if count is None else remainder[: count.start()]
-            # The first fixed note ends the path (``x untracked; not shown: ...``, and the tb4n5
-            # note on a file ranked last as generated output).
-            markers = [
-                marker
-                for note in (" not shown:", " untracked", " generated, build or minified output")
-                if (marker := path.find(note)) >= 0
-            ]
-            if markers:
-                path = path[: min(markers)]
-        if path:
-            entries.append((status, _decode_git_path(path)))
+        entry = check_change_header_line(line)
+        if entry is not None:
+            entries.append(entry)
     return tuple(entries)
 
 

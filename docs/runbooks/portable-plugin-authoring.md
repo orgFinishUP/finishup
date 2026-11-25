@@ -74,6 +74,9 @@ with the canonical native renderer and its exact adapter/harness/scope/FinishUP 
 marker and inventory self-consistency alone is insufficient. Modified, partial, stale, unmanaged,
 foreign, unsafe, or ambiguous trees are preserved and refused. Stage or rollback remnants produce
 `recovery_required`; status reports them and never deletes or chooses between them.
+A file name in the tree never changes that classification: a foreign file with a non-ASCII UTF-8
+name reads `unmanaged`, and one added inside a managed tree reads `modified` (#1394); a name that
+is not valid UTF-8 is refused `target_unsafe`.
 Removing or rolling back a plugin never removes FinishUP data, vault keys, credentials, privacy
 grants, provider bindings, or foreign host configuration.
 

@@ -5,6 +5,7 @@ The round-1 review's probes (B1, M1-M6, m1, m2) are regression tests here, asser
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Callable, Sequence
 from copy import deepcopy
@@ -46,7 +47,12 @@ from finishup.application.reviewer_loop import (
     Turn,
 )
 from finishup.application.reviewer_telemetry import read_usage_from_wire
-from finishup.domain.privacy import AuthorizationScope, AuthorizationScopeKind, PrivacyPolicy
+from finishup.domain.privacy import (
+    AuthorizationScope,
+    AuthorizationScopeKind,
+    CredentialHeuristic,
+    PrivacyPolicy,
+)
 from finishup.ports.change_capture import SnapshotFile, TaskInputSnapshotSet
 from finishup.ports.privacy import (
     OutboundGatewayPort,
@@ -1408,6 +1414,28 @@ async def test_empty_native_refusals_do_not_count_as_content_reads(tmp_path: Pat
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("value", ("Zq9" * 30, "plainvalue"), ids=("redacted", "plain"))
+async def test_a_line_past_the_end_is_not_recorded_even_when_redaction_shortened_the_file(
+    tmp_path: Path, value: str
+) -> None:
+    # An over-size file is withheld before redaction, so a start line past the last line names
+    # a missing line, never a spent result budget, whether or not a value was replaced.
+    (tmp_path / "settings.yaml").write_text(f'password: "{value}"\nrole: admin\n')
+    loop, broker, _, _ = _setup(
+        _text("w1", "settings.yaml", 10, 2),
+        _FINAL,
+        roots=[ReadRoot("w1", str(tmp_path.resolve()))],
+        policy=replace(
+            with_llm(minimal_external_policy()), credential_heuristic=CredentialHeuristic.DISABLED
+        ),
+    )
+    (result,) = _observations((await loop.run()).history)
+    assert (result["status"], result["reason"]) == ("unavailable", "not_recorded")
+    assert "Correct the relative path/line" in cast(str, result["continuation"])
+    assert broker.content_reads == 0
+
+
+@pytest.mark.anyio
 @pytest.mark.parametrize("static_admitted", [True, False])
 async def test_correction_metadata_is_admitted_and_never_contains_item_content(
     static_admitted: bool,
@@ -1529,3 +1557,146 @@ async def test_a_review_that_never_offers_a_read_keeps_the_read_free_schema(why:
     assert all(t.content != FINAL_PHASE for t in outcome.history)
     assert model.calls[1][0][-1].content.startswith("format_error: envelope_invalid. No reads")
     assert steps.rows[("turn", 1)][0] == b"final"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("changed", [True, False])
+async def test_a_declared_test_refusal_keeps_the_attempts_read_usage(
+    tmp_path: Path, changed: bool
+) -> None:
+    # #1220/#1173: a declared test edited or removed after the check is refused with the
+    # broker's own closed reason; the private usage row must still validate, or the whole
+    # attempt's read usage is dropped as if it were older, unknown telemetry.
+    test = tmp_path.resolve() / "test_x.py"
+    content = "def test_x():\n    assert True\n"
+    test.write_text(content)
+    digest = "sha256:" + hashlib.sha256(content.encode()).hexdigest()
+    if changed:
+        test.write_text(content + "# edited after the check\n")
+    else:
+        test.unlink()
+    root = ReadRoot("t1", str(tmp_path.resolve()), pinned=(("dt1", str(test), digest, "clm"),))
+    loop, broker, _model, _ = _setup(_text("t1", "dt1", 1, 2), _FINAL, roots=(root,))
+    (result,) = _observations((await loop.run()).history)
+    expected = "declared_test_changed" if changed else "declared_test_not_visible"
+    assert (result["status"], result["reason"]) == ("unavailable", expected)
+    usage = read_usage_from_wire(broker.read_usage)
+    assert usage is not None and [row["reason"] for row in usage] == [expected]
+
+
+def _issued_read_reasons() -> set[str]:
+    """Every literal read-result reason the broker and the reviewer-read admission can issue."""
+    import ast
+    import inspect
+
+    from finishup.application import egress, reviewer_broker
+
+    def strings(node: ast.expr) -> set[str]:
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return {node.value}
+        if isinstance(node, ast.IfExp):
+            return strings(node.body) | strings(node.orelse)
+        return set()
+
+    statuses = {"ok", "partial", "unavailable", "denied", "stale"}
+    found: set[str] = set()
+    for node in ast.walk(ast.parse(inspect.getsource(reviewer_broker))):
+        if isinstance(node, ast.Tuple) and len(node.elts) == 2:  # a selection's (status, reason)
+            if strings(node.elts[0]) & statuses:
+                found |= strings(node.elts[1])
+        elif isinstance(node, ast.Call) and getattr(node.func, "id", None) == "envelope":
+            if len(node.args) >= 2:
+                found |= strings(node.args[1])
+        elif isinstance(node, ast.Assign):  # usage["reason"] = ... and piece.truncation_reason
+            target = node.targets[0]
+            if (isinstance(target, ast.Attribute) and target.attr == "truncation_reason") or (
+                isinstance(target, ast.Subscript) and strings(target.slice) == {"reason"}
+            ):
+                found |= strings(node.value)
+        elif isinstance(node, ast.Dict):  # the usage row's initial "reason"
+            for key, value in zip(node.keys, node.values, strict=True):
+                if key is not None and strings(key) == {"reason"}:
+                    found |= strings(value)
+    found |= set(reviewer_broker._DECLARED_TEST_LIMITS)  # pyright: ignore[reportPrivateUsage]
+    admit = ast.parse(inspect.getsource(egress.PrivacyCoordinator.admit_reviewer_read).lstrip())
+    for node in ast.walk(admit):
+        if isinstance(node, ast.Return) and node.value is not None:
+            found |= strings(node.value)
+    return found
+
+
+def test_every_read_reason_the_service_issues_keeps_its_usage_row() -> None:
+    # #1173: owner-local read usage validates against one closed reason set; a reason the broker
+    # or the admission issues but the set lacks drops the attempt's whole usage tuple.
+    from finishup.domain.reviewer_reads import REVIEWER_READ_REASONS
+
+    issued = _issued_read_reasons()
+    assert {"declared_test_changed", "image_permission_required", "deadline"} <= issued
+    assert issued == REVIEWER_READ_REASONS
+    for reason in sorted(issued):
+        row: dict[str, JsonValue] = {
+            "call": 1,
+            "action": "read_ledger",
+            "args": {"view": "findings", "refs": ["f1"], "cursor": None},
+            "status": "unavailable",
+            "reason": reason,
+        }
+        assert read_usage_from_wire([row]) is not None, reason
+
+
+@pytest.mark.anyio
+async def test_a_packet_continuation_past_the_raw_length_reads_the_redacted_tail() -> None:
+    # A record's spans are offsets into its redacted text. With the heuristic disabled, short
+    # flagged values become the longer placeholder, so a continuation can lie past the raw
+    # record's length while the redacted text still holds the rest. It is served, never refused
+    # as not retained, and admission scans the raw lines the served text was cut from.
+    from finishup.observability.privacy import redact_fully
+
+    item_ref = "change-check-time-001"
+    diff = (
+        b"diff --git a/cfg.py b/cfg.py\n"
+        + b"".join(b"+passwd: q%03d\n" % i for i in range(100))
+        + b"".join(b"+retries_%03d = 3  # ordinary configuration line\n" % i for i in range(90))
+    )
+    case = _semantic_case(diff, with_aws_key=False)
+    item = next(i for i in case.items if i.item_id == item_ref)
+    redacted = redact_fully(item.content)
+    assert redacted is not None and len(redacted) > len(item.content)
+    offsets: list[int] = []
+
+    def follow(history: tuple[Turn, ...]) -> JsonValue:
+        first = _observations(history)[-1]
+        assert first["status"] == "partial", (first["reason"], first.get("continuation"))
+        span = cast(dict[str, dict[str, int]], _data(first)["provenance"])["span"]
+        offsets.append(span["end_exclusive"])
+        assert len(item.content) <= offsets[0] < len(redacted)
+        return _read(
+            "read_packet_section", section="excerpts", item_ref=item_ref, offset=offsets[0]
+        )
+
+    loop, broker, _model, _ = _setup(
+        _read("read_packet_section", section="excerpts", item_ref=item_ref, offset=0),
+        follow,
+        _FINAL,
+        case=case,
+        policy=replace(
+            with_llm(minimal_external_policy()), credential_heuristic=CredentialHeuristic.DISABLED
+        ),
+    )
+    admit = broker._admit  # pyright: ignore[reportPrivateUsage]
+    admitted: list[tuple[ReadElement, ...]] = []
+
+    async def record(elements: tuple[ReadElement, ...], envelope: bytes) -> str | None:
+        admitted.append(elements)
+        return await admit(elements, envelope)
+
+    broker._admit = record  # pyright: ignore[reportPrivateUsage]
+    _first, second = _observations((await loop.run()).history)
+    assert second["status"] in {"ok", "partial"}, (second["status"], second["reason"])
+    sent = cast(str, _data(second)["text"]).encode()
+    assert redacted[offsets[0] :].startswith(sent)
+    # The raw selection admission scans starts on the raw line the served text starts on.
+    line = redacted[: offsets[0]].count(b"\n")
+    raw_start = sum(len(r) + 1 for r in item.content.split(b"\n")[:line])
+    (raw,) = (data for _category, data, _root in admitted[-1] if data != sent)
+    assert item.content[raw_start:].startswith(raw)

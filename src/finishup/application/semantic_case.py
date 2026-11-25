@@ -186,7 +186,11 @@ from finishup.kernel.task_facts import (
     proxy_decisions,
     verification_limits_without_proxy,
 )
-from finishup.kernel.test_edit_visibility import check_change_header_entries, check_change_sections
+from finishup.kernel.test_edit_visibility import (
+    check_change_header_entries,
+    check_change_header_line,
+    check_change_sections,
+)
 from finishup.kernel.verification_capture import command_is_declared_verification
 from finishup.kernel.verification_coverage import build_verification_coverage
 from finishup.kernel.verification_freshness import VerificationFreshness, name_free_finding_detail
@@ -5275,18 +5279,14 @@ def _command_dumps_environment(command: str) -> bool:
 def _header_not_shown_path(line: str) -> str | None:
     """The repository-relative path on a check-time change header line that says it was not shown."""
 
-    if not line.startswith("  ") or " not shown:" not in line:
+    if " not shown:" not in line:
         return None
-    _status, _space, remainder = line[2:].partition(" ")
-    if not remainder:
+    # The same reading as every other header consumer: the counts (``(+N -M)`` or
+    # ``(binary)``) and the fixed notes (``untracked``, ``not shown: ...``) end the path.
+    entry = check_change_header_line(line)
+    if entry is None or entry[1] is None:
         return None
-    path = remainder[: remainder.find(" not shown:")].strip()
-    count = path.rfind(" (+")
-    if count >= 0:
-        path = path[:count].strip()
-    if len(path) >= 2 and path.startswith('"') and path.endswith('"'):
-        path = path[1:-1]
-    path = path.strip().strip("/")
+    path = entry[1].strip().strip("/")
     if not path or path.endswith("...") or "\x00" in path:
         return None
     return path

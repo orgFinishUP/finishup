@@ -5,7 +5,6 @@ from __future__ import annotations
 import platform
 import shutil
 import subprocess
-import tempfile
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Final
@@ -140,14 +139,8 @@ class MacOSCheckSandbox:
             return _passthrough(argv, cwd, env, status=CheckSandboxStatus.READY)
         if self._sandbox_exec is None or not Path(self._sandbox_exec).is_file():
             return _passthrough(argv, cwd, env, status=CheckSandboxStatus.UNAVAILABLE)
-        home = env.get("HOME", "/tmp")
-        tmpdir = env.get("TMPDIR", "/tmp")
-        _ = home, tmpdir
-        profile = _SEATBELT_NO_NETWORK
-        profile_dir = Path(tempfile.mkdtemp(prefix="finishup-sb-"))
-        profile_path = profile_dir / "no-network.sb"
-        profile_path.write_text(profile, encoding="ascii")
-        wrapped = (self._sandbox_exec, "-f", str(profile_path), *argv)
+        # The fixed profile goes inline (``-p``) so a run writes no profile file to clean up.
+        wrapped = (self._sandbox_exec, "-p", _SEATBELT_NO_NETWORK, *argv)
         return CheckSandboxLaunch(
             argv=wrapped,
             env=dict(env),

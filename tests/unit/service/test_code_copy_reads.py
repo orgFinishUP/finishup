@@ -7,6 +7,7 @@ import hashlib
 import hmac
 import os
 import stat
+import threading
 from pathlib import Path
 from typing import Any, cast
 
@@ -51,6 +52,7 @@ from finishup.service.code_copy import (
     CODE_COPY_KEK_MAC_DOMAIN,
     COPY_PRINCIPAL,
     CodeCopies,
+    SyncOutcome,
     VaultCopyKeyring,
 )
 from finishup.service.code_store import CodeStore, StoreLimits
@@ -326,6 +328,25 @@ def test_an_offline_client_s_reads_come_from_the_copy_as_last_synced_and_checks_
     with evidence_task_scope(TASK), pytest.raises(WorkspaceAgentUnavailable) as raised:
         runner.run(ApprovedCheckCommand(handle, approval, "sha256:" + "3" * 64))
     assert raised.value.reason == "no_agent"
+
+
+def test_an_offline_read_after_a_revert_comes_from_the_snapshot_synced_last(
+    tmp_path: Path,
+) -> None:
+    root = _repository(tmp_path, {"a.py": b"a\n"})
+    hub, copies, _routed = _service(tmp_path, root)
+    first = copies.sync_blocking(HANDLE, purpose="check")
+    (root / "a.py").write_bytes(b"b\n")
+    second = copies.sync_blocking(HANDLE, purpose="check")
+    assert first.outcome == second.outcome == "synced" and second.snapshot != first.snapshot
+    # The client reverts: the copy already holds its snapshot, an unchanged sync.
+    (root / "a.py").write_bytes(b"a\n")
+    reverted = copies.sync_blocking(HANDLE, purpose="check")
+    assert reverted.outcome == "unchanged" and reverted.snapshot == first.snapshot
+    hub.offline = True
+    view, _base = copies.git_view(HANDLE, purpose="check", base=None, task_id=None)
+    assert view is not None and view.stale
+    assert view.manifest.snapshot == first.snapshot  # never the edit the client reverted
 
 
 def test_a_reviewer_read_after_an_offline_check_is_a_stale_read_and_a_fresh_sync_ends_it(
@@ -922,3 +943,66 @@ def test_a_copy_read_whose_count_was_lost_is_never_taken_for_a_client_only_task(
         routed.capture(HANDLE, routed.read_task_base(HANDLE))
     again = restarted.provenance(TASK)
     assert again is not None and again.level_l2
+
+
+class _JoinSignal(threading.Event):
+    """A flight's ``done`` event that says when a second caller starts waiting on it."""
+
+    def __init__(self, waiting: threading.Event) -> None:
+        super().__init__()
+        self._waiting = waiting
+
+    def wait(self, timeout: float | None = None) -> bool:
+        self._waiting.set()
+        return super().wait(timeout)
+
+
+def test_a_task_whose_sync_joins_another_s_pull_is_pinned_with_its_sync_time(
+    tmp_path: Path,
+) -> None:
+    # Two tasks sync the same worktree against the same base at once: the second waits for the
+    # first one's pull and takes its outcome. Its pin records that pull's sync time too, so its
+    # evidence account names the copy snapshot it was read from (ADR-054, the pin's sync time).
+    root = _repository(tmp_path, {"a.py": b"a\n"})
+    hub, copies, _routed = _service(tmp_path, root)
+    original = hub.call_blocking
+    in_prepare = threading.Event()
+    release = threading.Event()
+
+    def call(handle_: str, operation: WorkspaceOperation, arguments: object, **kw: Any) -> object:
+        if operation is WorkspaceOperation.CODE_SYNC_PREPARE:
+            in_prepare.set()
+            assert release.wait(30)
+        return original(handle_, operation, arguments, **kw)
+
+    hub.call_blocking = call  # type: ignore[method-assign]
+    results: dict[str, SyncOutcome] = {}
+
+    def sync(task_id: str) -> None:
+        results[task_id] = copies.sync_blocking(HANDLE, purpose="check", task_id=task_id)
+
+    first = threading.Thread(target=sync, args=("task_a",))
+    first.start()
+    assert in_prepare.wait(30)
+    joined = threading.Event()
+    flight = copies._flights[COMMITMENT]  # pyright: ignore[reportPrivateUsage]
+    flight.done = _JoinSignal(joined)
+    second = threading.Thread(target=sync, args=("task_b",))
+    second.start()
+    assert joined.wait(30)
+    release.set()
+    first.join(30)
+    second.join(30)
+    assert not first.is_alive() and not second.is_alive()
+    outcome = results["task_a"]
+    assert results["task_b"] is outcome and outcome.outcome == "synced"
+    assert outcome.synced_at is not None and outcome.snapshot is not None
+    for task_id in ("task_a", "task_b"):
+        entry = copies.store.pin_entry(COPY_PRINCIPAL, COMMITMENT, task_id)
+        assert entry is not None
+        assert (entry.snapshot, entry.synced_at) == (outcome.snapshot, outcome.synced_at)
+    own, joined_account = copies.provenance("task_a"), copies.provenance("task_b")
+    assert own is not None and joined_account is not None
+    assert joined_account.snapshot is not None
+    assert joined_account.snapshot == own.snapshot
+    assert joined_account.snapshot.synced_at == outcome.synced_at

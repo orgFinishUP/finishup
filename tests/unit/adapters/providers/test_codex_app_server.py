@@ -3528,3 +3528,106 @@ async def test_model_listed_refuses_an_unconfirmed_cleanup(
 ) -> None:
     with pytest.raises(ValueError, match="^codex_subscription_readiness_unproven$"):
         await _model_listed(monkeypatch, _Runtime(_profile()), cleanup_outcome="failed")
+
+
+_GROUP_CLEANUP_SCRIPT = r'''
+import asyncio, json, os, sys
+from collections import deque
+from pathlib import Path
+
+sys.path.insert(0, sys.argv[1])
+from builders.codex_capability import profile_for, record_for
+from finishup.adapters import approved_checks
+from finishup.adapters.providers import codex_app_server as codex
+
+# The leader exits at once on TERM; its helper, in the same group, needs a moment longer.
+LEADER = """
+import os, signal, subprocess, sys, time
+helper = subprocess.Popen([sys.executable, "-c",
+    "import signal, sys, time\\n"
+    "signal.signal(signal.SIGTERM, lambda *a: (time.sleep(0.2), sys.exit(0)))\\n"
+    "print('helper', flush=True)\\n"
+    "time.sleep(60)"], stdout=subprocess.PIPE)
+helper.stdout.readline()
+signal.signal(signal.SIGTERM, lambda *a: os._exit(0))
+print("ready", flush=True)
+time.sleep(60)
+"""
+
+
+def members(group):
+    live, exited = [], []
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            fields = (entry / "stat").read_text().rpartition(")")[2].split()
+        except OSError:
+            continue
+        if len(fields) > 3 and fields[2] == str(group):
+            (exited if fields[0] in {"Z", "X"} else live).append(int(entry.name))
+    return live, exited
+
+
+async def main(subreaper, tmp):
+    if subreaper:
+        assert approved_checks._enable_child_subreaper()
+    process = await asyncio.create_subprocess_exec(
+        sys.executable, "-c", LEADER,
+        stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE, start_new_session=True,
+    )
+    assert await process.stdout.readline() == b"ready\n"
+    home = Path(tmp) / "home"
+    workdir = home / "runtime" / "attempt-group"
+    workdir.mkdir(parents=True)
+    runtime = codex._CodexProcess(
+        profile=profile_for(record_for(b"c", b"h", version="0.162.1"), home=home),
+        process=process,
+        workdir=workdir,
+        stderr_task=asyncio.create_task(codex._drain_stderr(process.stderr)),
+        pending_notifications=deque(),
+    )
+    outcome = await codex._cleanup(runtime)
+    live, exited = members(process.pid)
+    print(json.dumps({"outcome": outcome, "live": live, "exited": exited}))
+
+
+asyncio.run(main(sys.argv[2] == "1", sys.argv[3]))
+'''
+
+
+def _cleanup_group_in_fresh_interpreter(tmp_path: Path, *, subreaper: bool) -> dict[str, object]:
+    import subprocess
+    import sys
+
+    tests_root = Path(__file__).resolve().parents[3]
+    completed = subprocess.run(  # noqa: S603 - fixed argv, this interpreter
+        [
+            sys.executable,
+            "-c",
+            _GROUP_CLEANUP_SCRIPT,
+            str(tests_root),
+            "1" if subreaper else "0",
+            str(tmp_path),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    return cast(dict[str, object], json.loads(completed.stdout.strip().splitlines()[-1]))
+
+
+@pytest.mark.skipif(not Path("/proc/self/stat").exists(), reason="reads the Linux process table")
+@pytest.mark.parametrize("subreaper", [False, True], ids=["plain", "child_subreaper"])
+def test_cleanup_reports_terminated_when_every_group_member_has_exited(
+    tmp_path: Path, subreaper: bool
+) -> None:
+    # Once the service is a child subreaper (it becomes one the first time it runs an approved
+    # check), a group member that outlives the leader is reparented to the service and stays a
+    # zombie that still answers killpg(group, 0). Cleanup must reap it and report the group gone.
+    result = _cleanup_group_in_fresh_interpreter(tmp_path, subreaper=subreaper)
+
+    assert result == {"outcome": "terminated", "live": [], "exited": []}

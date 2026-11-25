@@ -26,6 +26,7 @@ from finishup.client import rest_discovery
 from finishup.client.rest_client import RestTransport, RestUnavailable
 from finishup.client.rest_discovery import check_key, discover, fetch_profile_async
 from finishup.client.targets import ServerTarget, new_remote_target, registry_lock
+from finishup.protocol.canonical import canonical_encode
 from finishup.protocol.server_profile import profile_from_json
 from finishup.rest.api_keys import ApiKeyStore
 from finishup.rest.app import RestApp
@@ -164,6 +165,32 @@ async def test_discovery_of_a_server_with_this_manifest_but_another_route_is_ref
             api_manifests=(current_api_manifest(),),
             profile_endpoint="/v2/server",
         )
+    )
+    transport = RestTransport(
+        "https://lab.example", key=None, transport=httpx.ASGITransport(app=_discovery_app(body))
+    )
+    try:
+        with pytest.raises(RestUnavailable) as refused:
+            await discover(transport)
+    finally:
+        await transport.aclose()
+    assert refused.value.reason == "remote_incompatible"
+
+
+@pytest.mark.parametrize("major", ["\u00b2", "\u0661"])
+async def test_discovery_of_a_non_ascii_rest_major_is_incompatible(major: str) -> None:
+    from finishup.rest.contract import current_api_manifest
+
+    body = canonical_encode(
+        {
+            "api_manifests": [current_api_manifest()],
+            "auth": ["api_key"],
+            "official": False,
+            "product": "finishup",
+            "profile_endpoint": "/v1/server",
+            "rest_majors": ["1", major],
+            "schema_version": "1.0.0",
+        }
     )
     transport = RestTransport(
         "https://lab.example", key=None, transport=httpx.ASGITransport(app=_discovery_app(body))

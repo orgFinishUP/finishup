@@ -23,6 +23,8 @@ from finishup.domain.privacy import ApprovedOutboundCase, DataCategory, Provider
 from finishup.ports.secret_memory import ProviderAttemptAuthBinding, ProviderAuthTransportCallback
 from finishup.ports.semantic import (
     Deadline,
+    SemanticResultInvalid,
+    SemanticResultRefused,
     SemanticResultSuccess,
     SemanticResultUnavailable,
 )
@@ -564,3 +566,60 @@ async def test_stream_of_neither_flavour_stays_unavailable() -> None:
 
     assert type(result) is SemanticResultUnavailable
     assert result.provenance.failure_class is SemanticFailureClass.TRANSPORT
+
+
+def _refusal_body(*, status: str = "completed", refusal: str = "I can't help with that.") -> bytes:
+    """A Responses body that declines the task the way the API reports it: a refusal part."""
+
+    return json.dumps(
+        {
+            "id": "resp_refused",
+            "object": "response",
+            "created_at": 0,
+            "model": "accounts/fireworks/models/minimax-m3",
+            "status": status,
+            "parallel_tool_calls": False,
+            "tool_choice": "none",
+            "tools": [],
+            "output": [
+                {
+                    "type": "message",
+                    "id": "msg_refused",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "refusal", "refusal": refusal}],
+                }
+            ],
+        },
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+
+@pytest.mark.anyio
+async def test_a_refusal_content_part_is_a_refusal_not_an_invalid_answer() -> None:
+    """A completed generation whose message only refuses is refused, never response_schema."""
+
+    inner = _ScriptedStreamTransport(chunks=[_refusal_body()])
+    result, _, case = await _evaluate_with_inner(inner)
+
+    assert type(result) is SemanticResultRefused, (
+        type(result).__name__,
+        result.provenance.failure_class,
+    )
+    assert result.provenance.status is SemanticStatus.REFUSED
+    assert result.provenance.failure_class is None
+    assert result.provenance.provider_request_id == "resp_refused"
+    assert result.provenance.policy_digest == case.policy_digest
+    # The refusal text is presence only: it never reaches the recorded provenance.
+    assert "help with that" not in repr(result)
+
+
+@pytest.mark.anyio
+async def test_an_empty_refusal_part_is_not_a_refusal() -> None:
+    """Only a non-empty refusal string declines; an empty one stays an empty answer."""
+
+    inner = _ScriptedStreamTransport(chunks=[_refusal_body(refusal="")])
+    result, _, _ = await _evaluate_with_inner(inner)
+
+    assert type(result) is SemanticResultInvalid
+    assert result.provenance.failure_class is SemanticFailureClass.RESPONSE_SCHEMA

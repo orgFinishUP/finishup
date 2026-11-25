@@ -1,9 +1,9 @@
 """Console entry point that fast-paths bounded commands past the typer graph.
 
 Loading ``finishup.cli.app`` costs a substantial typer/pydantic/protocol-schema import that a Codex
-hook never uses (#242). Only exact hook commands and the ordinary ``service status`` forms are
-fast-pathed; everything else falls through to the full CLI unchanged, so usage errors and
-``--help`` stay byte-identical.
+hook never uses (#242). Only exact hook commands, the ordinary ``service status`` forms, and the
+exact ``--version``, ``version`` and ``version --json`` forms are fast-pathed; everything else
+falls through to the full CLI unchanged, so usage errors and ``--help`` stay byte-identical.
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ import os
 import sys
 import time
 from collections.abc import Callable
-from typing import Final
+from typing import Final, cast
 
 # Sampled before any finishup module resolves, so the hook can measure the import
 # term it otherwise cannot see. Interpreter start itself is not portably
@@ -304,6 +304,105 @@ def _claude_observe_fast_path(arguments: list[str]) -> int | None:
     return 0
 
 
+# Typer answers shell-completion requests named by this variable (``prog_name`` is always
+# ``finishup``) before parsing any argument, even with completion installation disabled.
+_COMPLETION_VARIABLE: Final = "_FINISHUP_COMPLETE"
+_VERSION_FAST_ARGUMENTS: Final = (["--version"], ["version"])
+
+
+def _version_fast_path(arguments: list[str]) -> int | None:
+    """Answer the exact version forms without loading typer, or return None to fall through.
+
+    Exactly ``version --json`` is handed to ``_version_json_fast_path``, whose write outcomes
+    mirror ``version_command`` instead. Otherwise only the exact ``--version`` and ``version``
+    forms qualify; both print ``__version__`` through ``click.echo`` behind ``cli.app.main``, and
+    every outcome of that write is reproduced here: a closed stdout prints nothing and succeeds,
+    a broken pipe exits 1 with both streams pacified, an interrupt exits 130 silently, and any
+    other failure is ``cli.app.main``'s bounded ``internal_error`` line with its diagnostic
+    correlation.
+    """
+
+    if _COMPLETION_VARIABLE in os.environ:
+        return None
+    if arguments == ["version", "--json"]:
+        return _version_json_fast_path()
+    if arguments not in _VERSION_FAST_ARGUMENTS:
+        return None
+    from finishup import __version__
+
+    try:
+        try:
+            stream = sys.stdout
+            if stream is not None:
+                stream.write(__version__ + "\n")
+                stream.flush()
+        except KeyboardInterrupt:
+            return 130
+        except OSError as error:
+            if error.errno != errno.EPIPE:
+                raise
+            from click.utils import PacifyFlushWrapper
+
+            sys.stdout = PacifyFlushWrapper(sys.stdout)  # pyright: ignore[reportAttributeAccessIssue]
+            sys.stderr = PacifyFlushWrapper(sys.stderr)  # pyright: ignore[reportAttributeAccessIssue]
+            return 1
+    except Exception as error:
+        return _unexpected_cli_failure(error)
+    return 0
+
+
+def _version_json_fast_path() -> int | None:
+    """Write the ``version --json`` manifest without loading typer, or return None to fall through.
+
+    The manifest is built before anything is written, so any failure to build it (a resource
+    integrity refusal, a missing optional module, a defect) falls through to the full CLI, which
+    renders it exactly as it always has. The write itself mirrors ``version_command``: a broken
+    pipe exits 70, an interrupt exits 130 silently, and any other failure is ``cli.app.main``'s
+    bounded ``internal_error`` line.
+    """
+
+    try:
+        import finishup
+        from finishup.version import VersionManifest, version_manifest_json
+
+        builder = cast(Callable[[], VersionManifest], getattr(finishup, "get_version_manifest"))
+        payload = version_manifest_json(builder(), include_resources=False) + b"\n"
+    except KeyboardInterrupt:
+        return 130
+    except Exception:  # noqa: BLE001 - the full CLI renders every build failure itself
+        return None
+    try:
+        stream = sys.stdout.buffer
+        try:
+            stream.write(payload)
+            stream.flush()
+        except BrokenPipeError:
+            return 70
+    except KeyboardInterrupt:
+        return 130
+    except Exception as error:
+        return _unexpected_cli_failure(error)
+    return 0
+
+
+def _unexpected_cli_failure(error: Exception) -> int:
+    """Report a fast-path failure exactly as ``cli.app.main``'s catch-all does."""
+
+    from finishup.cli.app import (
+        _lifecycle_exit_code,  # pyright: ignore[reportPrivateUsage]
+        _stderr,  # pyright: ignore[reportPrivateUsage]
+        _unexpected_failure_suffix,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    lifecycle_exit = _lifecycle_exit_code(error)
+    if lifecycle_exit is not None:
+        return lifecycle_exit
+    _stderr(
+        "internal_error: the command could not be completed" + _unexpected_failure_suffix(error)
+    )
+    return 70
+
+
 def _unsupported_platform_exit(arguments: list[str], *, os_name: str | None = None) -> int | None:
     """Return the bounded exit for native Windows, or None where FinishUP can run.
 
@@ -344,10 +443,49 @@ def _record_spawned_service_refusal(argv: list[str], error: BaseException, token
         return
 
 
-def _run_full_cli() -> None:
-    """Load the typer graph and dispatch; split out so tests can prove it never loads on Windows."""
+# Full-CLI commands that serve until stopped; their import heap is never frozen.
+_SERVING_COMMANDS: tuple[list[str], ...] = (
+    ["service", "run"],
+    ["service", "rest", "run"],
+    ["helper", "run"],
+)
 
-    from finishup.cli.app import main as app_main
+
+def _run_full_cli() -> None:
+    """Load the typer graph and dispatch; split out so tests can prove it never loads on Windows.
+
+    The import builds a large heap that a short command never frees. Cyclic collection stays off
+    while it loads, and the result is frozen out of the collector's reach, so neither the
+    command's collections nor the one at interpreter exit rescan it. Collection is on again
+    before any command runs, even when the import raises. Garbage that already exists is
+    collected first, so nothing dead is ever frozen and its finalizers still run; an in-process
+    caller that is the first to load the CLI keeps its then-live objects frozen, as the command
+    process does. Three cases keep collection exactly as it was: ``mcp serve`` (collection is
+    already off; the bridge freezes its own heap), the processes that serve until stopped
+    (``service run``, ``service rest run`` including its native edge that runs the service
+    in-process, and ``helper run``) so their long-lived memory and collection cadence do not
+    change, and an in-process caller that has already loaded the CLI (nothing new to freeze).
+    An interactive session such as ``menu`` is frozen like a short command: its import heap
+    lives for the whole session anyway.
+    """
+
+    import gc
+
+    argv = sys.argv[1:]
+    fresh = (
+        gc.isenabled()
+        and "finishup.cli.app" not in sys.modules
+        and not any(argv[: len(server)] == server for server in _SERVING_COMMANDS)
+    )
+    if fresh:
+        gc.collect()
+        gc.disable()
+    try:
+        from finishup.cli.app import main as app_main
+    finally:
+        if fresh:
+            gc.freeze()
+            gc.enable()
 
     app_main()
 
@@ -453,8 +591,17 @@ def main() -> None:
     code = _unsupported_platform_exit(argv)
     if code is not None:
         raise SystemExit(code)
+    code = _version_fast_path(argv)
+    if code is not None:
+        raise SystemExit(code)
     if len(argv) >= 2 and argv[0] == "service" and argv[1] == "status":
         code = _service_status_fast_path(argv[2:])
         if code is not None:
             raise SystemExit(code)
+    if argv[:2] == ["mcp", "serve"] and not any(token in {"--help", "-h"} for token in argv):
+        # Bridge startup builds a large, long-lived import heap; cyclic collection would only
+        # rescan it. The bridge freezes that heap and re-enables collection before serving.
+        import gc
+
+        gc.disable()
     _run_full_cli()

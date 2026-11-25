@@ -647,6 +647,43 @@ def test_an_unchanged_sync_refreshes_retention_metadata_and_sync_time(tmp_path: 
     assert store.copies("alice") == ()
 
 
+def test_an_unchanged_sync_makes_its_snapshot_the_copy_s_newest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A client that reverts to a snapshot the copy holds syncs it unchanged: it is then the copy
+    as last synced (``latest``, the have-set, the recent window), as a re-upload would make it."""
+
+    monkeypatch.setattr(code_store, "_MAX_SNAPSHOTS", 2)
+    store = _store(tmp_path)
+    snaps = [snapshot_objects(BASE, {**CURRENT, "n.py": f"{n}\n".encode()}) for n in range(3)]
+    for snap in snaps[:2]:
+        _upload(store, snap.bundle(), _manifest(snap, snap.bundle()))
+    first, second = snaps[0].snapshot, snaps[1].snapshot
+    assert store.have("alice", "repo-1") == (first, second)
+
+    def refresh(snap: Snapshot) -> None:
+        store.refresh(
+            "alice",
+            "repo-1",
+            manifest=_manifest(snap, snap.bundle()),
+            retention=("until_forgotten", None),
+            epoch=store.epoch("alice", "repo-1"),
+            revision=REVISION,
+            worktree=WORKTREE,
+        )
+
+    refresh(snaps[0])
+    latest = store.latest("alice", "repo-1")
+    assert latest is not None and latest.snapshot == first
+    assert store.have("alice", "repo-1") == (second, first)
+    # The snapshot synced last stays in the recent window; the older one leaves first.
+    _upload(store, snaps[2].bundle(), _manifest(snaps[2], snaps[2].bundle()))
+    assert store.have("alice", "repo-1") == (first, snaps[2].snapshot)
+    with pytest.raises(CodeStoreError, match="code_snapshot_unknown"):
+        store.snapshot("alice", "repo-1", second)
+    assert not (_copy_folder(tmp_path) / "snapshots" / f"{second}.enc").exists()
+
+
 def test_an_unchanged_sync_is_validated_and_fenced_by_a_forget(tmp_path: Path) -> None:
     store = _store(tmp_path)
     snap = snapshot_objects(BASE, CURRENT)
