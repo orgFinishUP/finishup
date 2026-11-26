@@ -20,6 +20,7 @@ from typing import Any, cast
 import pytest
 
 import finishup.adapters.git_change_capture as capture_module
+import finishup.adapters.git_subject_state as subject_state_module
 from finishup.adapters.git_change_capture import ChangeCaptureUnavailable, GitChangeCaptureAdapter
 
 
@@ -80,6 +81,20 @@ def _repository(tmp_path: Path, *, packed: bool = True) -> Path:
     return repository
 
 
+def _release(pinned: Any) -> None:
+    """Close the pinned root through the handle that owns it, so it is closed exactly once.
+
+    Closing ``pinned.descriptor`` directly leaves the owner to close the same number again when
+    it is collected, which shuts whatever file has reused that number by then: on macOS, where
+    the refusal cases keep the handle alive until a later garbage collection, that was the
+    observation store's lock in the next test module.
+    """
+
+    payload = getattr(subject_state_module, "_workspace_payload")(pinned.handle)
+    payload.close()
+    assert payload.descriptor == -1
+
+
 def _fence(repository: Path) -> tuple[object, ...]:
     adapter: Any = GitChangeCaptureAdapter()
     pinned = adapter._open(os.fspath(repository), time.monotonic() + 30.0)
@@ -88,7 +103,7 @@ def _fence(repository: Path) -> tuple[object, ...]:
     except ChangeCaptureUnavailable as exc:
         return ("refused", exc.reason)
     finally:
-        os.close(pinned.descriptor)
+        _release(pinned)
 
 
 def _no_listing(_root_descriptor: int) -> None:
@@ -213,7 +228,7 @@ def test_a_name_another_file_system_could_fold_onto_a_fan_out_is_walked(
     try:
         assert getattr(capture_module, "_listed_fan_out_identities")(pinned.descriptor) is None
     finally:
-        os.close(pinned.descriptor)
+        _release(pinned)
 
     if file_system == "folding":
         folds = True
@@ -291,7 +306,7 @@ def test_an_unreadable_object_directory_is_decided_by_one_walk_per_name(
         walked = outcome()
     finally:
         objects.chmod(0o700)
-        os.close(pinned.descriptor)
+        _release(pinned)
 
     assert fallback == walked == ("refused", "unsafe_root")
     # Refused at the first name, exactly where the walk alone stops.
@@ -315,3 +330,23 @@ def test_the_fold_probe_answers_as_the_macos_volume_says(tmp_path: Path) -> None
     folds = case_sensitive == 0
     assert _folds_onto(tmp_path / "case", "AB", "ab") is folds
     assert _folds_onto(tmp_path / "ligature", "\ufb00", "ff") is folds
+
+
+def test_releasing_a_pinned_root_never_closes_a_reused_descriptor(tmp_path: Path) -> None:
+    """The helpers' release closes the root once; collecting the handle later closes nothing."""
+
+    import gc
+
+    repository = _repository(tmp_path)
+    adapter: Any = GitChangeCaptureAdapter()
+    pinned = adapter._open(os.fspath(repository), time.monotonic() + 30.0)
+    number = pinned.descriptor
+    _release(pinned)
+    reused = os.open(tmp_path, os.O_RDONLY)
+    try:
+        del pinned
+        gc.collect()
+        assert os.fstat(reused) is not None
+    finally:
+        os.close(reused)
+    assert number >= 0
