@@ -1767,6 +1767,15 @@ source untouched. Removal does not delete ledgers, vault/keyring state, provider
 privacy grants, project/user MCP entries, or unrelated Cursor settings. After removal, independently check installed bytes,
 discovery, activation, MCP sources, stale process/cache behavior, and regular-profile isolation.
 
+Files the operating system writes on its own are not plugin bytes and not local changes (ADR-023
+§9 amendment). On macOS, Finder writes `.DS_Store` into any folder it shows, including a hidden
+one once hidden files are shown, and macOS writes AppleDouble `._<name>` files beside files on
+exFAT, FAT, SMB and NFS volumes. A regular file with exactly such a name in the installed plugin
+tree changes no status or digest, never blocks replacement or removal, and is removed with the
+tree. A file beside it such as `.DS_Store.txt` or `notes._md` is still yours and still reads
+`modified`, and a link under such a name is still `target_unsafe`. The rule is the same on every
+platform and matches the Codex, portable and Claude Code plugin trees.
+
 ## Troubleshooting
 
 **Runtime another account can write.** A runtime another account can write (ADR-007, 2026-10-14) stops `finishup mcp serve` with `release_runtime_group_writable` or `release_runtime_world_writable` and the exact `chmod -R go-w` repair on stderr (Cursor lists the MCP server as failed and keeps its stderr in the MCP log). Its hooks exit 20 with no stdout, so they make no allow or block decision (exit 2 is the only blocking code); Cursor proceeds with the action; their stderr names the token without local paths and points at `finishup service run`, which prints the repair. Group write through the user's own private group (the Ubuntu/Fedora umask 0002 default) is accepted.
@@ -1803,7 +1812,7 @@ the 2026-08-29 measurement above recorded for a locked cell.
 | MCP resources load but every workflow call fails after a runtime upgrade | a pre-upgrade FinishUP service may still own the fixed endpoint; restart that exact service through the user-selected supervisor, then retry and require a returned task/session before claiming use |
 | Hook fires but status stays published-only | configuration/trigger is not accepted observation evidence |
 | Strict route has no AI-powered review | expected route ceiling; authorize a separate policy route when intended |
-| Modified plugin cannot remove | preserved local change; inspect and resolve manually. A file you added inside the installed plugin tree reads `modified` whatever its name (non-ASCII UTF-8 names included, #1386); a name that is not valid UTF-8 is refused `target_unsafe`. Move the file out, then re-run status |
+| Modified plugin cannot remove | preserved local change; inspect and resolve manually. A file you added inside the installed plugin tree reads `modified` whatever its name (non-ASCII UTF-8 names included, #1386), except a `.DS_Store` or AppleDouble `._` file macOS wrote on its own, which is ignored and removed with the tree; a name that is not valid UTF-8 is refused `target_unsafe`. Move the file out, then re-run status |
 | Install refuses `authority_required` after `--accept` | no `plugin_artifact_apply` review is prepared for that exact digest |
 | Install refuses `human_authority_unavailable` | the platform presence cell refused: on macOS LocalAuthentication was cancelled, unavailable, or timed out; on Linux or WSL 2 the password was wrong, empty, or cancelled, the command did not run from your own foreground terminal, or PAM is unavailable; any other platform has no cell; no mutation occurred |
 | Install replay reports `preview_stale` | the inferred action became `replace`; replay with `--action install` |

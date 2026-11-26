@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
+import sys
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -437,6 +439,238 @@ def test_inspect_digest_covers_unmanaged_files(tmp_path: Path) -> None:
     second = inspect_plugin(target, resource_source=resources)
 
     assert len({exact.installed_digest, first.installed_digest, second.installed_digest}) == 3
+
+
+# Files macOS writes into a folder on its own: Finder's ``.DS_Store`` in any folder it shows, and
+# an AppleDouble ``._<name>`` sibling for each file or folder with attributes on a volume that
+# cannot store them (exFAT, FAT, SMB, NFS). Bytes are the real magic numbers of each format.
+_FINDER_BYTES = b"\x00\x00\x00\x01Bud1" + b"\x00" * 24
+_APPLEDOUBLE_BYTES = b"\x00\x05\x16\x07\x00\x02\x00\x00Mac OS X        " + b"\x00" * 16
+_OS_METADATA_FILES = {
+    ".DS_Store": _FINDER_BYTES,
+    "skills/finishup/references/.DS_Store": _FINDER_BYTES,
+    "._.mcp.json": _APPLEDOUBLE_BYTES,
+    "._.codex-plugin": _APPLEDOUBLE_BYTES,
+    "skills/finishup/._SKILL.md": _APPLEDOUBLE_BYTES,
+}
+
+
+@pytest.mark.parametrize("litter", sorted(_OS_METADATA_FILES))
+def test_os_metadata_in_the_plugin_tree_is_not_owner_content(tmp_path: Path, litter: str) -> None:
+    """Finder and AppleDouble files are not files an owner keeps (ADR-023 §9).
+
+    They leave the tree exact with an unchanged digest, and a reinstall replaces the tree and
+    removes them with it, as it did before unmanaged files were refused.
+    """
+
+    tmp_path.chmod(0o700)
+    resources = _resources()
+    target = IntegrationTarget(IntegrationScope.TRUSTED_PROJECT, str(tmp_path))
+    exact = install_plugin(target, resource_source=resources, allow_untested=True)
+    destination = tmp_path / ".agents/plugins/finishup"
+    (destination / litter).write_bytes(_OS_METADATA_FILES[litter])
+
+    inspection = inspect_plugin(target, resource_source=resources)
+
+    assert inspection.presence is PluginHookPresence.INSTALLED
+    assert inspection.state is IntegrationState.INSTALLED_EXACT
+    assert inspection.installed_digest == exact.installed_digest
+
+    for replace_modified in (False, True):
+        (destination / litter).write_bytes(_OS_METADATA_FILES[litter])
+        reinstalled = install_plugin(
+            target,
+            resource_source=resources,
+            allow_untested=True,
+            replace_modified=replace_modified,
+        )
+        assert reinstalled.presence is PluginHookPresence.INSTALLED
+        assert reinstalled.installed_digest == exact.installed_digest
+        assert not (destination / litter).exists()
+        assert sorted(path.name for path in destination.parent.iterdir()) == ["finishup"]
+
+
+def test_a_prior_render_with_os_metadata_is_still_refreshed(tmp_path: Path) -> None:
+    """An upgrade from an older render is not blocked by a Finder or AppleDouble file in it."""
+
+    tmp_path.chmod(0o700)
+    resources = _resources()
+    target = IntegrationTarget(IntegrationScope.TRUSTED_PROJECT, str(tmp_path))
+    install_plugin(
+        target, resource_source=resources, allow_untested=True, codex_version="0.148.0-alpha.6"
+    )
+    destination = tmp_path / ".agents/plugins/finishup"
+    for litter, data in _OS_METADATA_FILES.items():
+        (destination / litter).write_bytes(data)
+    assert plugin_mod._is_prior_managed_render(destination)  # pyright: ignore[reportPrivateUsage]
+
+    refreshed = install_plugin(target, resource_source=resources, allow_untested=True)
+
+    assert refreshed.presence is PluginHookPresence.INSTALLED
+    assert b'"async":true' not in (destination / "hooks/hooks.json").read_bytes()
+    assert not any((destination / litter).exists() for litter in _OS_METADATA_FILES)
+
+
+def test_a_folder_holding_only_os_metadata_is_installed_over(tmp_path: Path) -> None:
+    """A folder made and opened in Finder holds no owner file, so install proceeds."""
+
+    tmp_path.chmod(0o700)
+    destination = tmp_path / ".agents/plugins/finishup"
+    (destination / "skills").mkdir(parents=True, mode=0o700)
+    (destination / ".DS_Store").write_bytes(_FINDER_BYTES)
+    (destination / "skills/.DS_Store").write_bytes(_FINDER_BYTES)
+    target = IntegrationTarget(IntegrationScope.TRUSTED_PROJECT, str(tmp_path))
+
+    inspection = install_plugin(target, resource_source=_resources(), allow_untested=True)
+
+    assert inspection.presence is PluginHookPresence.INSTALLED
+    assert not (destination / ".DS_Store").exists()
+    assert not (destination / "skills/.DS_Store").exists()
+
+
+@pytest.mark.parametrize("replace_modified", [False, True])
+def test_an_owner_file_beside_os_metadata_is_still_refused_and_both_are_kept(
+    tmp_path: Path, replace_modified: bool
+) -> None:
+    """Ignoring OS metadata never lets a reinstall remove a file the owner put there."""
+
+    tmp_path.chmod(0o700)
+    resources = _resources()
+    target = IntegrationTarget(IntegrationScope.TRUSTED_PROJECT, str(tmp_path))
+    install_plugin(target, resource_source=resources, allow_untested=True)
+    destination = tmp_path / ".agents/plugins/finishup"
+    for litter, data in _OS_METADATA_FILES.items():
+        (destination / litter).write_bytes(data)
+    owner_file = destination / "skills/finishup/my-notes.md"
+    owner_file.write_bytes(b"owner content\n")
+
+    inspection = inspect_plugin(target, resource_source=resources)
+    assert inspection.presence is PluginHookPresence.INSTALLED_UNTRUSTED_UNKNOWN
+    assert inspection.state is IntegrationState.MODIFIED
+
+    with pytest.raises(IntegrationError) as caught:
+        install_plugin(
+            target,
+            resource_source=resources,
+            allow_untested=True,
+            replace_modified=replace_modified,
+        )
+
+    assert caught.value.reason is IntegrationReason.DESTINATION_CONFLICT
+    assert caught.value.safe_details == {"unmanaged_files": True}
+    assert owner_file.read_bytes() == b"owner content\n"
+    for litter, data in _OS_METADATA_FILES.items():
+        assert (destination / litter).read_bytes() == data
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["DS_Store", ".DS_Store.txt", "notes._md", "._", "._notes/draft.md", ".ds_store"],
+)
+def test_names_that_only_resemble_os_metadata_are_owner_content(tmp_path: Path, name: str) -> None:
+    tmp_path.chmod(0o700)
+    resources = _resources()
+    target = IntegrationTarget(IntegrationScope.TRUSTED_PROJECT, str(tmp_path))
+    install_plugin(target, resource_source=resources, allow_untested=True)
+    owner_file = tmp_path / ".agents/plugins/finishup" / name
+    owner_file.parent.mkdir(parents=True, exist_ok=True)
+    owner_file.write_bytes(b"owner content\n")
+
+    assert inspect_plugin(target, resource_source=resources).state is IntegrationState.MODIFIED
+    with pytest.raises(IntegrationError) as caught:
+        install_plugin(target, resource_source=resources, allow_untested=True)
+
+    assert caught.value.reason is IntegrationReason.DESTINATION_CONFLICT
+    assert owner_file.read_bytes() == b"owner content\n"
+
+
+def test_a_link_named_like_os_metadata_is_still_unsafe(tmp_path: Path) -> None:
+    """Only a regular file is OS metadata: a link under that name is never followed or removed."""
+
+    tmp_path.chmod(0o700)
+    resources = _resources()
+    target = IntegrationTarget(IntegrationScope.TRUSTED_PROJECT, str(tmp_path))
+    install_plugin(target, resource_source=resources, allow_untested=True)
+    outside = tmp_path / "outside.txt"
+    outside.write_bytes(b"outside\n")
+    (tmp_path / ".agents/plugins/finishup/.DS_Store").symlink_to(outside)
+
+    assert inspect_plugin(target, resource_source=resources).state is IntegrationState.MODIFIED
+    with pytest.raises(IntegrationError) as caught:
+        install_plugin(target, resource_source=resources, allow_untested=True)
+
+    assert caught.value.reason is IntegrationReason.TARGET_UNSAFE
+    assert outside.read_bytes() == b"outside\n"
+
+
+def test_os_metadata_in_a_legacy_tree_keeps_its_removal_digest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from finishup.adapters.integrations.codex_plugin import (
+        legacy_plugin_tree_digest,
+        remove_legacy_plugin_tree,
+        render_plugin_install_tree,
+    )
+
+    tmp_path.chmod(0o700)
+    resources = _resources()
+    _enable_supported_profile(monkeypatch, resources)
+    target = IntegrationTarget(IntegrationScope.TRUSTED_PROJECT, str(tmp_path))
+    legacy = _legacy_tree(tmp_path, render_plugin_install_tree(resource_source=resources))
+    digest = legacy_plugin_tree_digest(target)
+    assert digest is not None
+    (legacy / ".DS_Store").write_bytes(_FINDER_BYTES)
+    (legacy / "skills/finishup/._SKILL.md").write_bytes(_APPLEDOUBLE_BYTES)
+
+    assert legacy_plugin_tree_digest(target) == digest
+    assert "legacy_plugin_tree_present" in inspect_plugin(target, resource_source=resources).notes
+
+    remove_legacy_plugin_tree(target, digest)
+
+    assert not legacy.exists()
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="AppleDouble files are written by macOS")
+def test_a_real_appledouble_file_from_macos_is_not_owner_content(tmp_path: Path) -> None:
+    """macOS itself writes ``._<name>`` beside a file whose attributes a FAT volume cannot hold.
+
+    The file is produced by the operating system on a scratch FAT disk image, then placed beside
+    the installed skill the way copying a folder from such a volume does.
+    """
+
+    tmp_path.chmod(0o700)
+    image = tmp_path / "scratch.dmg"
+    volume = tmp_path / "volume"
+    volume.mkdir(mode=0o700)
+    for command in (
+        ("hdiutil", "create", "-quiet", "-size", "4m", "-fs", "MS-DOS", "-volname", "FUTEST")
+        + (str(image),),
+        ("hdiutil", "attach", "-quiet", "-nobrowse", "-mountpoint", str(volume), str(image)),
+    ):
+        if subprocess.run(command, check=False).returncode != 0:
+            pytest.skip("hdiutil could not provide a scratch FAT volume on this machine")
+    try:
+        probe = volume / "SKILL.md"
+        probe.write_bytes(b"# probe\n")
+        subprocess.run(("xattr", "-w", "com.finishup.test", "1", str(probe)), check=True)
+        sibling = volume / "._SKILL.md"
+        assert sibling.is_file(), "macOS did not write an AppleDouble sibling on the FAT volume"
+        appledouble = sibling.read_bytes()
+    finally:
+        subprocess.run(("hdiutil", "detach", "-quiet", "-force", str(volume)), check=False)
+    assert appledouble.startswith(b"\x00\x05\x16\x07")
+
+    resources = _resources()
+    target = IntegrationTarget(IntegrationScope.TRUSTED_PROJECT, str(tmp_path))
+    exact = install_plugin(target, resource_source=resources, allow_untested=True)
+    litter = tmp_path / ".agents/plugins/finishup/skills/finishup/._SKILL.md"
+    litter.write_bytes(appledouble)
+
+    assert inspect_plugin(target, resource_source=resources).installed_digest == (
+        exact.installed_digest
+    )
+    install_plugin(target, resource_source=resources, allow_untested=True)
+    assert not litter.exists()
 
 
 def test_install_replaces_prior_managed_variant_render_without_replace_modified(

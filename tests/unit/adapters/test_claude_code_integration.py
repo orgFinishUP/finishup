@@ -1586,6 +1586,73 @@ def test_foreign_source_member_with_any_utf8_name_is_classified_modified(
     assert member.read_bytes() == b"mine\n"
 
 
+# Files macOS writes into a folder on its own: Finder's ``.DS_Store`` and AppleDouble ``._`` files.
+_OS_METADATA_FILES = {
+    ".DS_Store": b"\x00\x00\x00\x01Bud1",
+    "plugins/finishup/.DS_Store": b"\x00\x00\x00\x01Bud1",
+    "plugins/finishup/skills/finishup/._SKILL.md": b"\x00\x05\x16\x07\x00\x02\x00\x00",
+}
+
+
+def test_os_metadata_in_the_source_and_cache_is_not_owner_content_and_goes_with_them(
+    tmp_path: Path,
+) -> None:
+    """ADR-023 §9: OS-written metadata changes no status and never blocks removal.
+
+    Claude Code copies the plugin directory into its cache, so the cache may carry it too.
+    """
+
+    target, artifact, commands = _install_source(tmp_path)
+    before = status_claude_code_plugin(target, artifact, commands=commands)
+    source = Path(target.marketplace_root)
+    cache = commands._cache(target)  # pyright: ignore[reportPrivateUsage]
+    for litter, data in _OS_METADATA_FILES.items():
+        (source / litter).write_bytes(data)
+        if litter.startswith("plugins/finishup/"):
+            (cache / litter.removeprefix("plugins/finishup/")).write_bytes(data)
+
+    assert status_claude_code_plugin(target, artifact, commands=commands) == before
+
+    remove_request = request_id("req_10000000-0000-4000-8000-000000000081")
+    remove_preview = preview_claude_code_plugin(
+        remove_request, target, ClaudeCodePluginAction.REMOVE, artifact, commands=commands
+    )
+    removed = apply_claude_code_plugin(
+        remove_request,
+        target,
+        ClaudeCodePluginAction.REMOVE,
+        artifact,
+        accepted_preview_digest=remove_preview.preview_digest,
+        authority=_authority(remove_preview.preview_digest),
+        review=_Review(),
+        commands=commands,
+    )
+    assert removed.operation_state is PluginOperationState.COMPLETED
+    assert not source.exists()
+
+
+def test_an_owner_file_beside_os_metadata_in_the_source_still_reads_modified(
+    tmp_path: Path,
+) -> None:
+    target, artifact, commands = _install_source(tmp_path)
+    source = Path(target.marketplace_root)
+    for litter, data in _OS_METADATA_FILES.items():
+        (source / litter).write_bytes(data)
+    (source / "notes.md").write_bytes(b"mine\n")
+
+    status = status_claude_code_plugin(target, artifact, commands=commands)
+    assert status.state is PluginArtifactState.MODIFIED
+    with pytest.raises(ClaudeCodeIntegrationError) as removal:
+        preview_claude_code_plugin(
+            _REQUEST, target, ClaudeCodePluginAction.REMOVE, artifact, commands=commands
+        )
+    assert removal.value.reason is PluginArtifactReason.REMOVE_REFUSED
+    assert (source / "notes.md").read_bytes() == b"mine\n"
+    assert all(
+        (source / litter).read_bytes() == data for litter, data in _OS_METADATA_FILES.items()
+    )
+
+
 def test_source_member_name_that_is_not_utf8_is_a_typed_unsafe_target(tmp_path: Path) -> None:
     target, artifact, commands = _install_source(tmp_path)
     try:

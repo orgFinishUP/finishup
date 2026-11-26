@@ -76,7 +76,11 @@ foreign, unsafe, or ambiguous trees are preserved and refused. Stage or rollback
 `recovery_required`; status reports them and never deletes or chooses between them.
 A file name in the tree never changes that classification: a foreign file with a non-ASCII UTF-8
 name reads `unmanaged`, and one added inside a managed tree reads `modified` (#1394); a name that
-is not valid UTF-8 is refused `target_unsafe`.
+is not valid UTF-8 is refused `target_unsafe`. The exception is a regular file the operating
+system writes on its own, Finder's `.DS_Store` or a macOS AppleDouble `._<name>` file: it is
+skipped by every classification and digest, so it never makes a tree `modified` or `unmanaged`
+and never blocks replacement or removal, and it moves or goes with the directory it is in
+(ADR-023 §9 amendment).
 Removing or rolling back a plugin never removes FinishUP data, vault keys, credentials, privacy
 grants, provider bindings, or foreign host configuration.
 

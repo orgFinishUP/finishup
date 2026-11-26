@@ -16,6 +16,7 @@ from jsonschema.exceptions import ValidationError
 
 from finishup import __version__
 from finishup.adapters.integrations.codex_plugin import render_plugin_install_tree
+from finishup.adapters.integrations.os_metadata import is_os_metadata_file
 from finishup.config.foreign_write import project_root_admitted, writable_by_others
 from finishup.config.home_project import home_project_allowed
 from finishup.domain.values import RequestId
@@ -767,6 +768,12 @@ def _plugin_parent(root: Path, *, create: bool) -> Path:
 
 
 def _safe_tree_files(root: Path) -> dict[str, bytes]:
+    """Every regular file in the tree, skipping files the operating system wrote on its own.
+
+    ``.DS_Store`` and AppleDouble ``._`` files are not owner content (ADR-023 §9): they never
+    change a state or digest, and they go with the tree when it is replaced or removed.
+    """
+
     files: dict[str, bytes] = {}
     # A name that is not valid UTF-8 (possible on Linux) cannot be named in a digest, so the
     # tree is refused as unsafe rather than letting a codec error escape the closed reasons.
@@ -782,6 +789,8 @@ def _safe_tree_files(root: Path) -> dict[str, bytes]:
         if path.is_symlink():
             raise _error(PluginArtifactReason.TARGET_UNSAFE)
         if path.is_dir():
+            continue
+        if path.is_file() and is_os_metadata_file(path.name):
             continue
         if not path.is_file() or path.stat().st_nlink != 1 or path.stat().st_size > _MAX_FILE_BYTES:
             raise _error(PluginArtifactReason.TARGET_UNSAFE)

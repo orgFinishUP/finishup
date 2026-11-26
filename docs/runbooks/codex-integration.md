@@ -750,6 +750,17 @@ files. Plugin inspection reports such a tree as not exact (`installed_untrusted_
 digest binds the unmanaged files, and activation preview refuses it with the same
 `destination_conflict` (`unmanaged_files: true`) before any Codex command.
 
+On macOS, files the operating system writes on its own are not unmanaged files (ADR-023 §9
+amendment): Finder's `.DS_Store`, which it writes into any folder it shows, and AppleDouble
+`._<name>` files, which macOS writes beside files on exFAT, FAT, SMB and NFS volumes. Finder
+hides both, so they are never what the continuation asks you to move. Inspection, its digest and
+activation preview skip them, a source install or refresh replaces the directory and removes them
+with it, and `plugin add` copying them into the Codex cache only makes setup refresh that cache.
+Only a regular file with exactly such a name counts: `.DS_Store.txt`, `notes._md` or a file
+inside a folder named `._notes` is still yours and still refused, and a link under such a name
+is still `target_unsafe`. The same rule applies to the portable, Claude Code and Cursor plugin
+trees, on every platform.
+
 Every setup route gives one continuation for it, naming the directory: move those files, or the
 whole directory, outside `.agents/plugins`, then rerun setup. Which reason carries it depends on
 where the route stops:
@@ -2483,7 +2494,7 @@ egress.
 | Write/swap interrupted | Run `status`; preserve any staged content; do not delete it yourself. |
 | Skill not discovered, or duplicate `$finishup` names loaded | Check the exact scope, loaded skill roots, managed path, trust, version, and capability matrix; reload Codex. |
 | Setup reports `installed_not_activated` | Run `finishup recommend list --codex-path <exact-executable> --codex-home <exact-home>`, then accept only the freshly shown target/preview digest. Historical acceptance cannot suppress an observed inactive target; a decline suppresses only its unchanged exact target. Review canonical inventory and the versioned cache; marketplace/config presence alone is insufficient. A marker-consistent stale cache is refreshed by an ordinary approved re-run. |
-| Activation reports `destination_conflict` | The versioned cache (or a config/marketplace surface) holds foreign, marker-inconsistent, or modified content. Review it by hand; setup only replaces trees that match their own FinishUP install marker. Another FinishUP-connected project in the same home is not a conflict. When the next step names `.agents/plugins/finishup` instead, that directory holds files FinishUP did not write: move them, or the whole directory, outside `.agents/plugins` and rerun setup. A different Codex home does not help. |
+| Activation reports `destination_conflict` | The versioned cache (or a config/marketplace surface) holds foreign, marker-inconsistent, or modified content. Review it by hand; setup only replaces trees that match their own FinishUP install marker. Another FinishUP-connected project in the same home is not a conflict. When the next step names `.agents/plugins/finishup` instead, that directory holds files FinishUP did not write (a `.DS_Store` or AppleDouble `._` file macOS wrote on its own is not one): move them, or the whole directory, outside `.agents/plugins` and rerun setup. A different Codex home does not help. |
 | Setup reports `project_connected_via_other_path` | This directory is already connected under another path (symlink, letter case, or a move). Run the `setup disconnect` the message names for this project (it clears the other entry), then connect again. |
 | Disconnect reports `membership_unverified` | No verified project is left to carry the shared pieces, but projects FinishUP connected earlier or trusted checkouts with FinishUP's plugin files (`possible_users`) might still use them. Reconnect the project that uses FinishUP (that records it) and rerun the disconnect, or preview `setup disconnect --remove-shared` if none does. |
 | Setup reports `connection_lock_unavailable` | Nothing changed. FinishUP could not take its setup lock under its own state directory (the folder is named in the message). It must be a local, owner-only (0700) folder without symlinked parts on a filesystem that supports `flock`. |
