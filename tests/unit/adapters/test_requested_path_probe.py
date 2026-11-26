@@ -916,3 +916,38 @@ def test_macos_names_the_rule_file_for_a_decomposed_path(tmp_path: Path) -> None
         (True, "repository_file", ".gitignore"),
         (True, "repository_file", ".gitignore"),
     ]
+
+
+def test_a_composed_spelling_that_names_no_rule_is_asked_once_more_as_written(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A Git whose composition differs from the modelled decoder still gets its rule named.
+
+    Here the rule is spelled decomposed, so only the path as written matches it. On Linux the
+    quiet argument query (never composed) proves the path ignored; with composition modelled on,
+    the composed rule query names nothing, and the path is asked once more as written instead of
+    reading as outside the repository. Composition that matches costs no second query.
+    """
+
+    repository = _repository(tmp_path)
+    _set_precompose_unicode(repository, "true")
+    (repository / ".gitignore").write_text(f"checkpoints/\n{_DECOMPOSED}/\n", encoding="utf-8")
+    folder = repository / _DECOMPOSED
+    folder.mkdir()
+    (folder / "x").write_text("x\n", encoding="utf-8")
+    monkeypatch.setattr(capture_module, "_git_precomposes_arguments", lambda: True)
+    calls = _record_git_calls(monkeypatch)
+
+    (probe,) = GitChangeCaptureAdapter().probe_requested_paths(
+        os.fspath(repository), (f"{_DECOMPOSED}/x",)
+    )
+
+    assert (probe.ignored, probe.ignore_source, probe.ignore_file) == (
+        True,
+        "repository_file",
+        ".gitignore",
+    )
+    assert [stdin for arguments, stdin in calls if "--stdin" in arguments] == [
+        f"{_COMPOSED}/x".encode() + b"\0",
+        f"{_DECOMPOSED}/x".encode() + b"\0",
+    ]

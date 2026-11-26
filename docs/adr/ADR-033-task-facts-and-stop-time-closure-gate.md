@@ -134,6 +134,9 @@ agent must not be able to stop silently with known work left.
    asking about a path Git never matched. A path the decoder refuses (a character beyond that
    plane, U+FFFE, U+FFFF, or bytes that are not UTF-8) Git keeps as written, and the second
    query sends it as written too, as it does every path when the setting cannot be read.
+   That model is checked against Apple's decoder only: when the composed spelling names no
+   rule (a Git built on an older or another iconv that composed differently), the second query
+   is asked once more with the path as written before the source reads as unknown.
    A requested directory is changed when the change touches any path beneath it (the capture
    lists files, never directories), and the repository root itself is inside and changed by any
    change (tb4n1: `/app/src` with four new files was reported unchanged and `/app` outside; #987).

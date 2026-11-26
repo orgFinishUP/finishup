@@ -1358,19 +1358,25 @@ class GitChangeCaptureAdapter:
                 composed = _precomposed(path) if _git_precomposes_arguments() else path
                 if composed != path and precomposes is None:
                     precomposes = self._precomposes_unicode(pinned, deadline)
-                queried_path = composed if precomposes else path
-                try:
-                    _, verbose = self._git(
-                        pinned,
-                        (*config, "check-ignore", "-v", "-z", "--stdin"),
-                        deadline=deadline,
-                        limit=8_192,
-                        accepted=frozenset({0, 1}),
-                        stdin_bytes=queried_path + b"\0",
-                    )
-                except (ValueError, ChangeCaptureUnavailable):
-                    verbose = b""
-                sources[path] = verbose.split(b"\0", 1)[0] if b"\0" in verbose else b""
+                # A composed spelling that names no rule is asked once more as written: a Git
+                # whose decoder composed differently (an older or another iconv) matched that.
+                source = b""
+                for spelling in dict.fromkeys((composed if precomposes else path, path)):
+                    try:
+                        _, verbose = self._git(
+                            pinned,
+                            (*config, "check-ignore", "-v", "-z", "--stdin"),
+                            deadline=deadline,
+                            limit=8_192,
+                            accepted=frozenset({0, 1}),
+                            stdin_bytes=spelling + b"\0",
+                        )
+                    except (ValueError, ChangeCaptureUnavailable):
+                        verbose = b""
+                    source = verbose.split(b"\0", 1)[0] if b"\0" in verbose else b""
+                    if source:
+                        break
+                sources[path] = source
         info_exclude = os.fsencode(pinned.root / ".git" / "info" / "exclude")
         holds_file: dict[bytes, bool | None] = {}
         probes: list[RequestedPathProbe] = []
