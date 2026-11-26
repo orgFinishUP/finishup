@@ -419,12 +419,15 @@ link at that path is followed: the file it points to is the one replaced, and th
 link.
 
 Where a replacement is not possible, or would change more than the content, the export is written
-straight into what is already at the path instead: a device or a pipe, a file that has another
-hard link, a file whose owner a new file cannot be given, a file whose access-control list or
-other extended attributes differ from what a new file in that folder gets, and a writable file in
-a folder that does not allow files to be created or replaced. Access-control lists and extended
-attributes are checked on Linux only. On macOS FinishUP cannot read them, so a file that has them
-is replaced and loses them; set them again after the export.
+straight into what is already at the path instead: a device or a pipe; `/dev/stdout` and the other
+names in `/dev`, `/dev/fd` or `/proc/<pid>/fd`, which stand for a device or for something the
+command already has open, so `--output /dev/stdout > policy.toml` writes into `policy.toml`
+itself; a file that has another hard link; a file whose owner a new file cannot be given; a file
+whose access-control list, other extended attributes or, on macOS, file flags (such as `hidden`)
+differ from what a new file in that folder gets; and a writable file in a folder that does not
+allow files to be created or replaced. FinishUP reads these on Linux and macOS. Wherever it
+cannot read them, an existing file is written straight into rather than replaced, so it keeps
+them.
 
 Only a direct write can stop part-way. If it does, `privacy_desired_output_incomplete` and exit
 code 2 say the file may be incomplete; export again. A path that cannot be written at all (an

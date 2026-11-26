@@ -10920,15 +10920,19 @@ facade and are never MCP tools.
   resolves to, keeping the old file's owner, group and permissions (a new file gets the default
   mode). The temporary file is flushed to storage first, except on a file system that cannot be
   told to flush. It writes in place where a rename cannot leave what a plain write leaves: a
-  device or pipe, a file with another hard link, a file whose owner a new file cannot be given, a
-  file whose extended attributes (its access-control list, security label and `user.*`
-  attributes) cannot be read or are not exactly those of the temporary file made beside it, and
-  a file whose folder does not allow the rename. Extended attributes are compared on Linux only.
-  Known gap: on macOS Python can read neither them nor an access-control list, so a file replaced
-  there loses both. A path that cannot be written, a read-only file included, fails as
-  `privacy_desired_output_unwritable` with nothing saved; an in-place write that stops after it
-  began fails as `privacy_desired_output_incomplete`. Both are CLI-only and exit 2, and neither
-  carries the path or the operating-system message.
+  device or pipe; a path that, as given or once resolved, names an entry of `/dev`, `/dev/fd` or
+  `/proc/<pid>/fd` (`/dev/stdout` sent to a file resolves to `/dev/fd/1` on macOS, where nothing
+  can be created, and to the file's own name on Linux, where a rename would strand the open
+  descriptor on the unnamed old file); a file with another hard link; a file whose owner a new
+  file cannot be given; a file whose extended attributes (on Linux its access-control list,
+  security label and `user.*` attributes; on macOS its extended attributes read through
+  libSystem, its access-control list and its `st_flags` file flags) cannot be read or are not
+  exactly those of the temporary file made beside it; and a file whose folder does not allow the
+  rename. On any other platform they cannot be read, so an existing file is always written in
+  place there (a new file is still renamed into place). A path that cannot be written, a
+  read-only file included, fails as `privacy_desired_output_unwritable` with nothing saved; an
+  in-place write that stops after it began fails as `privacy_desired_output_incomplete`. Both are
+  CLI-only and exit 2, and neither carries the path or the operating-system message.
 - `config/toml_text.py`: `load_toml_text()`, the one TOML parse every reader uses. Any document
   `tomllib` cannot load raises `tomllib.TOMLDecodeError` (`TomlNotLoadable` for an integer past
   the integer string conversion limit or deep inline nesting, which `tomllib` reports as

@@ -1,8 +1,8 @@
 """`finishup privacy export-desired --output` names an unwritable path instead of failing inside.
 
 It also leaves what a plain write leaves: a symlink is followed and kept, an existing file keeps
-its permissions, group, access-control list, extended attributes and other hard links, and a
-device or pipe is written directly.
+its permissions, group, access-control list, extended attributes, file flags and other hard
+links, and a device, pipe or `/dev/stdout` is written directly.
 """
 
 from __future__ import annotations
@@ -10,10 +10,14 @@ from __future__ import annotations
 import errno
 import json
 import os
+import pwd
 import stat
 import struct
+import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
+from typing import IO, cast
 
 import pytest
 from tests.unit.config.test_privacy_desired import (
@@ -22,11 +26,13 @@ from tests.unit.config.test_privacy_desired import (
 
 import finishup.cli.app as app
 import finishup.config.paths as paths
+from finishup.config import privacy_desired
 from finishup.config.privacy_desired import (
     _to_json,  # pyright: ignore[reportPrivateUsage]
     load_privacy_desired_canonical,
     render_privacy_desired_toml,
 )
+from finishup.protocol.canonical import JsonValue, canonical_encode
 
 _REMEDY = (
     "privacy_desired_output_unwritable: Nothing was saved. Choose a writable file path in an "
@@ -349,6 +355,100 @@ def test_export_to_a_device_writes_it_directly(
     assert stat.S_ISCHR(device.stat().st_mode)
 
 
+def test_export_writes_in_place_a_file_its_path_reaches_through_dev_fd(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """What macOS answers for `/dev/stdout` when the shell sent it to a file.
+
+    The path resolves to `/dev/fd/1`, which reports the very file the descriptor holds, and no
+    file can be made in `/dev/fd` to rename over it.
+    """
+
+    target = _stale_file(tmp_path, 0o640)
+    before = target.stat()
+    alias = "/dev/fd/1"
+    resolve = os.path.realpath
+    lstat = Path.lstat
+    open_descriptor = os.open
+
+    def realpath(path: str | Path) -> str:
+        return alias if os.fspath(path) == os.fspath(target) else resolve(path)
+
+    def lstat_through_the_descriptor(self: Path) -> os.stat_result:
+        return target.stat() if os.fspath(self) == alias else lstat(self)
+
+    def open_nothing_new_in_dev_fd(path: str | Path, flags: int, mode: int = 0o777) -> int:
+        if os.fspath(path).startswith(alias.rsplit("/", 1)[0] + "/"):
+            raise FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT))
+        return open_descriptor(path, flags, mode)
+
+    monkeypatch.setattr(os.path, "realpath", realpath)
+    monkeypatch.setattr(Path, "lstat", lstat_through_the_descriptor)
+    monkeypatch.setattr(os, "open", open_nothing_new_in_dev_fd)
+
+    code = _run_export(target, tmp_path, monkeypatch)
+
+    assert code == 0, capsys.readouterr().err
+    load_privacy_desired_canonical(target)
+    assert (target.stat().st_ino, _permissions(target)) == (before.st_ino, 0o640)
+    assert _entries(target.parent) == ["policy.toml"]
+
+
+# Writes the export to `/dev/stdout` in a fresh process, as `--output /dev/stdout` does.
+_EXPORT_TO_STDOUT = (
+    "import sys\n"
+    "from pathlib import Path\n"
+    "from finishup.adapters.privacy.catalog import decode_privacy_policy_canonical\n"
+    "from finishup.config.privacy_desired import write_privacy_desired_toml\n"
+    "policy = decode_privacy_policy_canonical(sys.stdin.buffer.read())\n"
+    "write_privacy_desired_toml(policy, Path('/dev/stdout'))\n"
+)
+
+
+def _export_to_stdout(
+    tmp_path: Path, stdout: int | IO[bytes]
+) -> tuple[subprocess.CompletedProcess[bytes], bytes]:
+    if not Path("/dev/stdout").exists():
+        pytest.skip("needs /dev/stdout")
+    policy = _policy(network=False, telemetry=False)
+    completed = subprocess.run(
+        [sys.executable, "-c", _EXPORT_TO_STDOUT],
+        input=canonical_encode(cast(JsonValue, _to_json(policy))),
+        stdout=stdout,
+        stderr=subprocess.PIPE,
+        cwd=tmp_path,
+        check=False,
+        timeout=120,
+    )
+    return completed, render_privacy_desired_toml(policy).encode("utf-8")
+
+
+def test_export_to_dev_stdout_writes_into_the_file_stdout_was_sent_to(tmp_path: Path) -> None:
+    received = _stale_file(tmp_path)
+    before = received.stat()
+
+    # As a shell's `> policy.toml` does: the file is emptied and handed over as stdout.
+    with received.open("wb") as stdout:
+        completed, expected = _export_to_stdout(tmp_path, stdout)
+
+    assert completed.returncode == 0, completed.stderr.decode(errors="replace")
+    assert received.read_bytes() == expected
+    # The file stdout holds is the one written, not one renamed over its name: anything the
+    # program writes to stdout afterwards still reaches the same file.
+    assert received.stat().st_ino == before.st_ino
+    assert _entries(received.parent) == ["policy.toml"]
+
+
+def test_export_to_dev_stdout_writes_into_the_pipe_stdout_is(tmp_path: Path) -> None:
+    completed, expected = _export_to_stdout(tmp_path, subprocess.PIPE)
+
+    assert completed.returncode == 0, completed.stderr.decode(errors="replace")
+    assert completed.stdout == expected
+    assert list(tmp_path.iterdir()) == []
+
+
 def test_export_rewrites_a_writable_file_in_a_folder_that_takes_no_new_file(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -606,6 +706,144 @@ def test_export_replaces_a_file_on_a_file_system_that_has_no_attributes(
     assert _entries(target.parent) == ["policy.toml"]
 
 
+def _on_platform(name: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Only the writer's view of the platform changes; the interpreter's ``sys`` is untouched.
+    monkeypatch.setattr(privacy_desired, "sys", SimpleNamespace(platform=name))
+
+
+class _MacosReader:
+    """Stands in for what macOS reports a file carries: the old file, then the new one beside it."""
+
+    def __init__(self, old: object, new: object) -> None:
+        self._old = old
+        self._new = new
+
+    def read(self, file: Path | int) -> object:
+        # The old file is read by its path, the still-empty new one by its open descriptor.
+        return self._new if isinstance(file, int) else self._old
+
+
+def _read_on_macos(old: object, new: object, monkeypatch: pytest.MonkeyPatch) -> None:
+    _on_platform("darwin", monkeypatch)
+    monkeypatch.setattr(privacy_desired, "_darwin_security", lambda: _MacosReader(old, new))
+
+
+# A new macOS file carries no flags, no extended attributes and no access-control list. Each
+# entry is (file flags, extended attributes, access-control list) for a file that carries what
+# `chflags hidden`, `xattr -w user.note kept` or `chmod +a "user:... allow read"` gave it.
+_NOTHING_CARRIED: tuple[int, dict[bytes, bytes], bytes | None] = (0, {}, None)
+_CARRIED_ON_MACOS: dict[str, tuple[int, dict[bytes, bytes], bytes | None]] = {
+    "hidden_flag": (stat.UF_HIDDEN, {}, None),
+    "attribute": (0, {b"user.note": b"kept"}, None),
+    "access_list": (
+        0,
+        {},
+        b"!#acl 1\nuser:FFFFEEEE-DDDD-CCCC-BBBB-AAAA000001F5:me:501:allow:read\n",
+    ),
+}
+
+
+@pytest.mark.parametrize("carried", sorted(_CARRIED_ON_MACOS))
+def test_export_on_macos_writes_in_place_a_file_carrying_what_a_new_file_would_not(
+    carried: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    target = _stale_file(tmp_path, 0o640)
+    before = target.stat()
+    _read_on_macos(_CARRIED_ON_MACOS[carried], _NOTHING_CARRIED, monkeypatch)
+
+    code = _run_export(target, tmp_path, monkeypatch)
+
+    assert code == 0, capsys.readouterr().err
+    load_privacy_desired_canonical(target)
+    # Renaming a new file over it would drop the flag, attribute or list entry.
+    assert (target.stat().st_ino, _permissions(target)) == (before.st_ino, 0o640)
+    assert _entries(target.parent) == ["policy.toml"]
+
+
+def test_export_on_macos_replaces_a_file_that_carries_only_what_a_new_file_there_gets(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    target = _stale_file(tmp_path, 0o640)
+    before = target.stat()
+    # What every file this program makes in a folder with an inherited list entry carries.
+    given = (0, {b"com.apple.provenance": b"\x01\x02"}, b"!#acl 1\nuser:...:allow,inherited:read\n")
+    _read_on_macos(given, given, monkeypatch)
+
+    code = _run_export(target, tmp_path, monkeypatch)
+
+    assert code == 0, capsys.readouterr().err
+    load_privacy_desired_canonical(target)
+    assert target.stat().st_ino != before.st_ino
+    assert _permissions(target) == 0o640
+    assert _entries(target.parent) == ["policy.toml"]
+
+
+def _cannot_tell(how: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    if how == "other_platform":
+        _on_platform("freebsd14", monkeypatch)
+        return
+    _on_platform("darwin", monkeypatch)
+    if how == "macos_without_the_calls":
+        monkeypatch.setattr(privacy_desired, "_darwin_security", lambda: None)
+        return
+
+    class _Refused:
+        def read(self, _file: Path | int) -> object:
+            raise PermissionError(errno.EPERM, os.strerror(errno.EPERM))
+
+    monkeypatch.setattr(privacy_desired, "_darwin_security", _Refused)
+
+
+_CANNOT_TELL = ["other_platform", "macos_without_the_calls", "macos_read_refused"]
+
+
+@pytest.mark.parametrize("how", _CANNOT_TELL)
+def test_export_writes_in_place_where_it_cannot_tell_what_the_file_carries(
+    how: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    target = _stale_file(tmp_path, 0o640)
+    before = target.stat()
+    _cannot_tell(how, monkeypatch)
+
+    code = _run_export(target, tmp_path, monkeypatch)
+
+    assert code == 0, capsys.readouterr().err
+    load_privacy_desired_canonical(target)
+    # The in-place write keeps whatever the file carries; a replacement could drop it.
+    assert (target.stat().st_ino, _permissions(target)) == (before.st_ino, 0o640)
+    assert _entries(target.parent) == ["policy.toml"]
+
+
+@pytest.mark.parametrize("how", _CANNOT_TELL)
+def test_a_new_export_file_is_still_made_whole_where_it_cannot_tell_what_files_carry(
+    how: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    destination = tmp_path / "out"
+    destination.mkdir()
+    target = destination / "policy.toml"
+    _cannot_tell(how, monkeypatch)
+    # Only a rename can fail this way: a new file is made whole beside the name, then moved.
+    _fail_the_rename_onto(target, errno.EIO, monkeypatch)
+
+    code = _run_export(target, tmp_path, monkeypatch)
+
+    captured = capsys.readouterr()
+    assert code == 2, captured.err
+    assert captured.err.strip() == _REMEDY
+    assert _entries(destination) == []
+
+
 def _fail_the_rename_onto(target: Path, code: int, monkeypatch: pytest.MonkeyPatch) -> None:
     rename = os.replace
 
@@ -729,3 +967,94 @@ def test_a_direct_write_that_stops_part_way_says_the_file_may_be_incomplete(
     assert "internal_error" not in captured.err
     assert str(device) not in captured.err
     assert captured.out == ""
+
+
+# -- macOS's own access-control lists, extended attributes and file flags -------------------------
+
+_ON_MACOS = pytest.mark.skipif(
+    sys.platform != "darwin", reason="uses macOS's chmod +a, xattr and chflags"
+)
+
+
+def _macos(*command: str) -> str:
+    return subprocess.run(command, check=True, capture_output=True, text=True, timeout=60).stdout
+
+
+def _me() -> str:
+    return pwd.getpwuid(os.getuid()).pw_name
+
+
+def _file_flags(path: Path) -> int:
+    if sys.platform != "darwin":
+        return 0
+    return path.stat().st_flags
+
+
+def _macos_extras(path: Path) -> tuple[list[str], str, int]:
+    """The list entries `ls -le` shows, every attribute `xattr -l` shows, and the file flags."""
+
+    entries = [line.strip() for line in _macos("ls", "-led", str(path)).splitlines()[1:]]
+    return entries, _macos("xattr", "-l", str(path)), _file_flags(path)
+
+
+def _give(carried: str, path: Path) -> None:
+    if carried in {"access_list", "all"}:
+        _macos("chmod", "+a", f"user:{_me()} allow read", str(path))
+    if carried in {"attribute", "all"}:
+        _macos("xattr", "-w", "user.note", "kept", str(path))
+    if carried in {"hidden_flag", "all"}:
+        _macos("chflags", "hidden", str(path))
+
+
+@_ON_MACOS
+@pytest.mark.parametrize("carried", ["access_list", "attribute", "hidden_flag", "all"])
+def test_export_on_macos_keeps_an_access_list_attribute_and_flag_by_writing_in_place(
+    carried: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    target = _stale_file(tmp_path, 0o640)
+    _give(carried, target)
+    kept = _macos_extras(target)
+    entries, attributes, flags = kept
+    assert (bool(entries), "user.note: kept" in attributes, bool(flags & stat.UF_HIDDEN)) == (
+        carried in {"access_list", "all"},
+        carried in {"attribute", "all"},
+        carried in {"hidden_flag", "all"},
+    )
+    before = target.stat()
+
+    code = _run_export(target, tmp_path, monkeypatch)
+
+    assert code == 0, capsys.readouterr().err
+    load_privacy_desired_canonical(target)
+    assert _macos_extras(target) == kept
+    assert (target.stat().st_ino, _permissions(target)) == (before.st_ino, 0o640)
+    assert _entries(target.parent) == ["policy.toml"]
+
+
+@_ON_MACOS
+def test_export_on_macos_replaces_a_file_whose_access_list_its_folder_gives_every_new_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    destination = tmp_path / "out"
+    destination.mkdir()
+    _macos("chmod", "+a", f"user:{_me()} allow read,file_inherit", str(destination))
+    target = destination / "policy.toml"
+    target.write_text("stale", encoding="utf-8")
+    kept = _macos_extras(target)
+    assert kept[0], "a new file in the folder inherits its list entry"
+    before = target.stat()
+
+    code = _run_export(target, tmp_path, monkeypatch)
+
+    assert code == 0, capsys.readouterr().err
+    load_privacy_desired_canonical(target)
+    # The new file inherited the same entry, so replacing the old one keeps what it carried.
+    assert _macos_extras(target) == kept
+    assert target.stat().st_ino != before.st_ino
+    assert _permissions(target) == stat.S_IMODE(before.st_mode)
+    assert _entries(destination) == ["policy.toml"]
