@@ -123,8 +123,17 @@ agent must not be able to stop silently with known work left.
    global ignore file); for an ignored path a second `git check-ignore -v -z --stdin` names the
    rule's source. Git for macOS composes a decomposed argument path (`core.precomposeUnicode`,
    which `git init` sets there) but reads standard input as sent, so on macOS, when that setting
-   is true, the second query is sent the path's composed (NFC) spelling: both queries then ask
-   about the same path, and a rule in the repository is not reported as `outside_repository`.
+   is true, the second query is sent the spelling Git composed the first one into: both queries
+   then ask about the same path, and a rule in the repository is not reported as
+   `outside_repository`. That spelling is Git's own, not NFC: Git converts the argument with
+   iconv's `UTF-8-MAC` decoder, which joins a character to the one before it only where Unicode
+   3.2 defines that pair's canonical composite in the Basic Multilingual Plane (the 917 pairs of
+   Apple's table, matched by Python's `unicodedata.ucd_3_2_0`) or the two form a Hangul
+   syllable, and keeps every other character as written; NFC would also rewrite singletons
+   (U+212B ANGSTROM SIGN, U+F900), decompose composition exclusions (U+0958) and reorder marks,
+   asking about a path Git never matched. A path the decoder refuses (a character beyond that
+   plane, U+FFFE, U+FFFF, or bytes that are not UTF-8) Git keeps as written, and the second
+   query sends it as written too, as it does every path when the setting cannot be read.
    A requested directory is changed when the change touches any path beneath it (the capture
    lists files, never directories), and the repository root itself is inside and changed by any
    change (tb4n1: `/app/src` with four new files was reported unchanged and `/app` outside; #987).
@@ -338,8 +347,11 @@ agent must not be able to stop silently with known work left.
   (another host, a missed hook, observation off) are invisible; `PATH` resolution may differ from
   the shell's; `effective_user` describes the hook process, not the delivery environment.
 - Cost: one compact status read per Stop of a mapped session, one `stat` plus one or two
-  `git check-ignore` calls per requested file per check, and one pass over the accepted prefix
-  per case build and per compact status read.
+  `git check-ignore` calls per requested file per check, on macOS at most one
+  `git config --get core.precomposeUnicode` read per probe of the requested files (made only
+  once an ignored requested path has a non-ASCII spelling Git's composition changes, and not
+  retried if it fails), and one pass over the accepted prefix per case build and per compact
+  status read.
 - Scope of the requested-output read: it runs in `check` only. Status candidate findings and the
   AI-powered review's matching of local findings use the case alone, so they never show an absent
   output; the check result, its recorded finding and the receipt do. Like the structural test-edit

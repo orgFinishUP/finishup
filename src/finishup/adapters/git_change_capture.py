@@ -1314,7 +1314,9 @@ class GitChangeCaptureAdapter:
         ignored: set[bytes] = set()
         unknown: set[bytes] = set()
         sources: dict[bytes, bytes] = {}
-        # Read at most once, and only on macOS for a non-ASCII path Git proved ignored.
+        # Whether Git composes argument paths here: read at most once per call (a failed read
+        # counts as false and is not retried), only on macOS, and only for an ignored path whose
+        # spelling that composition changes.
         precomposes: bool | None = None
         # The root is never ignored by Git, so it is not queried.
         queried = [
@@ -1353,13 +1355,11 @@ class GitChangeCaptureAdapter:
                 # ``--stdin`` as sent, so the path goes in the spelling the quiet query was
                 # answered for; sent decomposed it matches no rule and its source reads as
                 # ``outside_repository``.
+                composed = _precomposed(path) if _git_precomposes_arguments() else path
+                if composed != path and precomposes is None:
+                    precomposes = self._precomposes_unicode(pinned, deadline)
+                queried_path = composed if precomposes else path
                 try:
-                    queried_path = path
-                    if _git_precomposes_arguments() and not path.isascii():
-                        if precomposes is None:
-                            precomposes = self._precomposes_unicode(pinned, deadline)
-                        if precomposes:
-                            queried_path = _precomposed(path)
                     _, verbose = self._git(
                         pinned,
                         (*config, "check-ignore", "-v", "-z", "--stdin"),
@@ -3517,16 +3517,21 @@ class GitChangeCaptureAdapter:
 
         Git for macOS does so when ``core.precomposeUnicode`` is true, which ``git init`` writes
         there; unset is false. The runner reads no system or global configuration, so this is
-        the value every other call through it acts on.
+        the value every other call through it acts on. A read that fails counts as unset: the
+        path then goes as written, and at worst its rule source reads as a failed rule query's
+        does. A setting Git cannot parse never gets here, as the quiet query fails on it first.
         """
 
-        code, raw = self._git(
-            pinned,
-            ("config", "--bool", "--get", "core.precomposeUnicode"),
-            deadline=deadline,
-            limit=64,
-            accepted=frozenset({0, 1}),
-        )
+        try:
+            code, raw = self._git(
+                pinned,
+                ("config", "--bool", "--get", "core.precomposeUnicode"),
+                deadline=deadline,
+                limit=64,
+                accepted=frozenset({0, 1}),
+            )
+        except (ValueError, ChangeCaptureUnavailable):
+            return False
         return code == 0 and raw.strip() == b"true"
 
     # --- rendering ---------------------------------------------------------------------------
@@ -5094,16 +5099,79 @@ def _git_precomposes_arguments() -> bool:
 def _precomposed(path: bytes) -> bytes:
     """``path`` as Git for macOS composes an argument path under ``core.precomposeUnicode``.
 
-    Git composes decomposed UTF-8 (``e`` + U+0301 becomes U+00E9), the Unicode NFC form of what
-    a macOS file system or input method decomposes; bytes that are not UTF-8 stay as they are,
-    as Git leaves them.
+    Git converts a non-ASCII argument from iconv's ``UTF-8-MAC`` to UTF-8 and keeps it as
+    written when that conversion fails. Apple's decoder (libiconv's ``UTF8MAC`` module) reads
+    the text left to right and joins a character to the one before it, as already joined, only
+    where the two are a canonical pair: ``e`` + U+0301 becomes U+00E9, a Hangul jamo sequence
+    its syllable. Anything else stays as written. That is less than NFC, which this must not
+    be: NFC also maps singletons (U+212B ANGSTROM SIGN to U+00C5, U+F900 to U+8C48), decomposes
+    composition exclusions (U+0958) and reorders marks, so its spelling can match a rule Git
+    never matched, or none. Apple's decoder refuses a character beyond the Basic Multilingual
+    Plane, U+FFFE and U+FFFF, and bytes that are not UTF-8, so such a path stays as written too.
     """
 
+    if path.isascii():
+        return path
     try:
         text = path.decode("utf-8", errors="strict")
     except UnicodeDecodeError:
         return path
-    return unicodedata.normalize("NFC", text).encode("utf-8")
+    if any(ord(character) >= 0xFFFE for character in text):
+        return path
+    composed: list[str] = []
+    for character in text:
+        joined = _mac_composite(composed[-1], character) if composed else None
+        if joined is None:
+            composed.append(character)
+        else:
+            composed[-1] = joined
+    return "".join(composed).encode("utf-8")
+
+
+# Hangul syllable composition (The Unicode Standard, section 3.12), which Apple's decoder computes.
+_HANGUL_SYLLABLE_BASE: Final = 0xAC00
+_HANGUL_SYLLABLE_COUNT: Final = 11_172
+_HANGUL_LEADING_BASE: Final = 0x1100
+_HANGUL_LEADING_COUNT: Final = 19
+_HANGUL_VOWEL_BASE: Final = 0x1161
+_HANGUL_VOWEL_COUNT: Final = 21
+_HANGUL_TRAILING_BASE: Final = 0x11A7
+_HANGUL_TRAILING_COUNT: Final = 28
+
+
+def _mac_composite(base: str, mark: str) -> str | None:
+    """The character Apple's ``UTF-8-MAC`` decoder joins ``base`` and ``mark`` into, if any.
+
+    Its table is Unicode 3.2's canonical compositions in the Basic Multilingual Plane: the
+    primary composites whose canonical decomposition is exactly this pair (917 pairs, checked
+    against Apple's table; none of them a composition exclusion). ``unicodedata.ucd_3_2_0``
+    holds that Unicode version, so a pair Unicode added later (Balinese, 5.0) is not joined,
+    as Apple's table lacks it. A Hangul leading consonant and vowel, or an LV syllable and a
+    trailing consonant, join by the standard arithmetic, as in Apple's decoder.
+    """
+
+    first, second = ord(base), ord(mark)
+    if (
+        0 <= first - _HANGUL_LEADING_BASE < _HANGUL_LEADING_COUNT
+        and 0 <= second - _HANGUL_VOWEL_BASE < _HANGUL_VOWEL_COUNT
+    ):
+        return chr(
+            _HANGUL_SYLLABLE_BASE
+            + ((first - _HANGUL_LEADING_BASE) * _HANGUL_VOWEL_COUNT + second - _HANGUL_VOWEL_BASE)
+            * _HANGUL_TRAILING_COUNT
+        )
+    if (
+        0 <= first - _HANGUL_SYLLABLE_BASE < _HANGUL_SYLLABLE_COUNT
+        and (first - _HANGUL_SYLLABLE_BASE) % _HANGUL_TRAILING_COUNT == 0
+        and 0 < second - _HANGUL_TRAILING_BASE < _HANGUL_TRAILING_COUNT
+    ):
+        return chr(first + second - _HANGUL_TRAILING_BASE)
+    joined = unicodedata.ucd_3_2_0.normalize("NFC", base + mark)
+    if len(joined) == 1 and unicodedata.ucd_3_2_0.decomposition(joined) == (
+        f"{first:04X} {second:04X}"
+    ):
+        return joined
+    return None
 
 
 def _global_excludes_file(deadline: float) -> str | None:
