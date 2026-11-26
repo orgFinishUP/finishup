@@ -120,7 +120,11 @@ agent must not be able to stop silently with known work left.
    the repository fence: the path is located under the validated root lexically, reached without
    following a link and only `stat`-ed, and `git check-ignore -q` answers whether Git would add
    it (honouring `.gitignore`, `.git/info/exclude`, a repository excludes file and the owner's
-   global ignore file); for an ignored path a second `git check-ignore -v` names the rule's source.
+   global ignore file); for an ignored path a second `git check-ignore -v -z --stdin` names the
+   rule's source. Git for macOS composes a decomposed argument path (`core.precomposeUnicode`,
+   which `git init` sets there) but reads standard input as sent, so on macOS, when that setting
+   is true, the second query is sent the path's composed (NFC) spelling: both queries then ask
+   about the same path, and a rule in the repository is not reported as `outside_repository`.
    A requested directory is changed when the change touches any path beneath it (the capture
    lists files, never directories), and the repository root itself is inside and changed by any
    change (tb4n1: `/app/src` with four new files was reported unchanged and `/app` outside; #987).
