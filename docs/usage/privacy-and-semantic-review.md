@@ -419,15 +419,19 @@ link at that path is followed: the file it points to is the one replaced, and th
 link.
 
 Where a replacement is not possible, or would change more than the content, the export is written
-straight into what is already at the path instead: a device or a pipe; `/dev/stdout` and the other
-names in `/dev`, `/dev/fd` or `/proc/<pid>/fd`, which stand for a device or for something the
-command already has open, so `--output /dev/stdout > policy.toml` writes into `policy.toml`
-itself; a file that has another hard link; a file whose owner a new file cannot be given; a file
-whose access-control list, other extended attributes or, on macOS, file flags (such as `hidden`)
-differ from what a new file in that folder gets; and a writable file in a folder that does not
-allow files to be created or replaced. FinishUP reads these on Linux and macOS. Wherever it
-cannot read them, an existing file is written straight into rather than replaced, so it keeps
+straight into what is already at the path instead: a device or a pipe; a path that, once any links
+in it are followed, names an entry of `/dev`, `/dev/fd` or `/proc/<pid>/fd`, which stands for a
+device or for something the command already has open (on macOS, `/dev/stdout` leads to
+`/dev/fd/1`); a file that has another hard link; a file whose owner a new file cannot be given; a
+file whose access-control list, other extended attributes or, on macOS, file flags (such as
+`hidden`) differ from what a new file in that folder gets; and a writable file in a folder that
+does not allow files to be created or replaced. FinishUP reads these on Linux and macOS. Wherever
+it cannot read them, an existing file is written straight into rather than replaced, so it keeps
 them.
+
+To keep the export in a file, name that file with `--output`. `--output /dev/stdout` writes the
+export to standard output, where the command then prints its own result line, so sending standard
+output to a file with `>` can leave that line in the file, and `apply-desired` cannot load it.
 
 Only a direct write can stop part-way. If it does, `privacy_desired_output_incomplete` and exit
 code 2 say the file may be incomplete; export again. A path that cannot be written at all (an

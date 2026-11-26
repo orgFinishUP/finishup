@@ -66,9 +66,9 @@ _RENAME_UNAVAILABLE: Final = frozenset(
 # there is none to ask for.
 _FLUSH_UNAVAILABLE: Final = frozenset({errno.EINVAL, errno.ENOSYS, errno.ENOTSUP})
 # Folders whose entries stand for a device or for a file a process already has open, such as
-# `/dev/stdout`, `/dev/fd/1` and, on Linux, `/proc/self/fd/1`. Writing to such a name means
-# writing into what it stands for: no file can be made beside it, and a file renamed over what it
-# resolves to would not be the one the process holds.
+# `/dev/fd/1`, which macOS resolves `/dev/stdout` to, or a Linux `/proc/<pid>/fd` entry a path
+# still names once resolved. Writing to such a name means writing into what it stands for: no
+# file can be made beside it, and a file renamed over it would not be the one the process holds.
 _DEVICES: Final = Path("/dev")
 _DESCRIPTOR_FOLDERS: Final = frozenset({_DEVICES, _DEVICES / "fd"})
 _PROCESSES: Final = Path("/proc")
@@ -176,10 +176,10 @@ def _replace_whole(path: Path, data: bytes) -> bool:
         return False
     # Rename over the file a symlink names, never over the link.
     destination = Path(os.path.realpath(path))
-    if _stands_for_an_open_file(path, destination):
-        # `/dev/stdout` sent to a file is that file only through this process's descriptor:
-        # macOS resolves it to `/dev/fd/1`, where nothing can be made, and Linux to the file's
-        # own name, where a rename would leave the descriptor on the old, unnamed file.
+    if _stands_for_an_open_file(destination):
+        # macOS resolves `/dev/stdout` sent to a file to `/dev/fd/1`, which reports that file
+        # but where nothing can be made. Linux resolves it to the file's own name, which is
+        # renamed over as any other name is.
         return False
     try:
         resolved = destination.lstat()
@@ -229,18 +229,16 @@ def _replace_whole(path: Path, data: bytes) -> bool:
     return True
 
 
-def _stands_for_an_open_file(path: Path, destination: Path) -> bool:
-    """Whether *path* names a device or a file a process already has open.
+def _stands_for_an_open_file(destination: Path) -> bool:
+    """Whether the resolved *destination* names a device or a file a process already has open.
 
-    It does when, as given or once resolved to *destination*, it is an entry of `/dev`, `/dev/fd`
-    or a process's `fd` folder under `/proc`.
+    It does when it is an entry of `/dev`, `/dev/fd` or a process's `fd` folder under `/proc`.
+    Only the resolved name is checked: on Linux `/dev/stdout` sent to a file resolves to that
+    file's own name and is replaced like any other path.
     """
 
-    for name in (Path(os.path.abspath(path)), destination):
-        folder = name.parent
-        if folder in _DESCRIPTOR_FOLDERS or (folder.name == "fd" and _PROCESSES in folder.parents):
-            return True
-    return False
+    folder = destination.parent
+    return folder in _DESCRIPTOR_FOLDERS or (folder.name == "fd" and _PROCESSES in folder.parents)
 
 
 def _made_like(descriptor: int, path: Path, existing: os.stat_result) -> bool:
@@ -462,13 +460,13 @@ def write_privacy_desired_toml(policy: PrivacyPolicy, path: Path) -> Path:
     permissions, and a new file gets the process's default mode.
 
     Where a rename cannot leave that, the bytes are written in place instead: into a device or
-    pipe, a name in `/dev`, `/dev/fd` or `/proc/<pid>/fd` (as given or once resolved; such as
-    `/dev/stdout`, which stands for what this process already has open), a file that has
-    another hard link, a file whose owner a new file may not be given, a file whose
-    access-control list, other extended attributes or (on macOS) file flags such as `hidden` a
-    new file there would not have, and a file whose folder does not allow the rename. Linux and
-    macOS are read for those; on any other platform, or where they cannot be read, an existing
-    file is written in place so it keeps them. Only such a write can stop part-way.
+    pipe, a path that resolves to a name in `/dev`, `/dev/fd` or `/proc/<pid>/fd` (such as
+    `/dev/stdout` on macOS, which resolves to `/dev/fd/1`), a file that has another hard link,
+    a file whose owner a new file may not be given, a file whose access-control list, other
+    extended attributes or (on macOS) file flags such as `hidden` a new file there would not
+    have, and a file whose folder does not allow the rename. Linux and macOS are read for those;
+    on any other platform, or where they cannot be read, an existing file is written in place so
+    it keeps them. Only such a write can stop part-way.
 
     A path that cannot be written (an existing directory, a parent that is a file, a file that
     may not be written, a forbidden or read-only parent with no writable file at the path)

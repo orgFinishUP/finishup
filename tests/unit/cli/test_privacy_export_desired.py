@@ -2,7 +2,7 @@
 
 It also leaves what a plain write leaves: a symlink is followed and kept, an existing file keeps
 its permissions, group, access-control list, extended attributes, file flags and other hard
-links, and a device, pipe or `/dev/stdout` is written directly.
+links, and a device, a pipe or, on macOS, `/dev/stdout` is written directly.
 """
 
 from __future__ import annotations
@@ -396,7 +396,10 @@ def test_export_writes_in_place_a_file_its_path_reaches_through_dev_fd(
     assert _entries(target.parent) == ["policy.toml"]
 
 
-# Writes the export to `/dev/stdout` in a fresh process, as `--output /dev/stdout` does.
+# The result line `privacy export-desired` prints on stdout once the export is written.
+_RESULT_LINE = b'{"path":"/dev/stdout","schema":"yoetz.privacy-desired/1"}\n'
+# Writes the export to `/dev/stdout` in a fresh process and then prints the result line to
+# stdout, as `--output /dev/stdout` does.
 _EXPORT_TO_STDOUT = (
     "import sys\n"
     "from pathlib import Path\n"
@@ -404,6 +407,7 @@ _EXPORT_TO_STDOUT = (
     "from finishup.config.privacy_desired import write_privacy_desired_toml\n"
     "policy = decode_privacy_policy_canonical(sys.stdin.buffer.read())\n"
     "write_privacy_desired_toml(policy, Path('/dev/stdout'))\n"
+    f"sys.stdout.buffer.write({_RESULT_LINE!r})\n"
 )
 
 
@@ -425,7 +429,7 @@ def _export_to_stdout(
     return completed, render_privacy_desired_toml(policy).encode("utf-8")
 
 
-def test_export_to_dev_stdout_writes_into_the_file_stdout_was_sent_to(tmp_path: Path) -> None:
+def test_export_to_dev_stdout_writes_the_file_stdout_was_sent_to(tmp_path: Path) -> None:
     received = _stale_file(tmp_path)
     before = received.stat()
 
@@ -434,18 +438,25 @@ def test_export_to_dev_stdout_writes_into_the_file_stdout_was_sent_to(tmp_path: 
         completed, expected = _export_to_stdout(tmp_path, stdout)
 
     assert completed.returncode == 0, completed.stderr.decode(errors="replace")
-    assert received.read_bytes() == expected
-    # The file stdout holds is the one written, not one renamed over its name: anything the
-    # program writes to stdout afterwards still reaches the same file.
-    assert received.stat().st_ino == before.st_ino
     assert _entries(received.parent) == ["policy.toml"]
+    if sys.platform == "darwin":
+        # macOS resolves `/dev/stdout` to `/dev/fd/1`, and opening that duplicates stdout: the
+        # export goes into the very file stdout holds, and the result line printed next
+        # follows it there, so the file no longer loads.
+        assert received.stat().st_ino == before.st_ino
+        assert received.read_bytes() == expected + _RESULT_LINE
+    else:
+        # Linux resolves `/dev/stdout` to the file's own name, which is replaced whole like any
+        # other path. Stdout still holds the old, now unnamed file, so the result line goes
+        # there and the file holds the export alone.
+        assert received.read_bytes() == expected
 
 
 def test_export_to_dev_stdout_writes_into_the_pipe_stdout_is(tmp_path: Path) -> None:
     completed, expected = _export_to_stdout(tmp_path, subprocess.PIPE)
 
     assert completed.returncode == 0, completed.stderr.decode(errors="replace")
-    assert completed.stdout == expected
+    assert completed.stdout == expected + _RESULT_LINE
     assert list(tmp_path.iterdir()) == []
 
 
