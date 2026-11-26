@@ -918,6 +918,10 @@ def test_macos_names_the_rule_file_for_a_decomposed_path(tmp_path: Path) -> None
     ]
 
 
+@pytest.mark.skipif(
+    sys.platform == "darwin",
+    reason="Git for macOS composes the argument query, so a decomposed rule never matches it",
+)
 def test_a_composed_spelling_that_names_no_rule_is_asked_once_more_as_written(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
