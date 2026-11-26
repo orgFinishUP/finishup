@@ -1107,3 +1107,30 @@ async def test_a_skill_on_a_fat_volume_keeps_exact_and_is_removed_with_companion
         await _apply(adapter, target, IntegrationAction.REMOVE, "39")
         assert not destination.exists()
         assert not [name for name in os.listdir(destination.parent) if name.startswith(".yoetz.")]
+
+
+@pytest.mark.anyio
+async def test_a_member_other_than_os_metadata_that_vanishes_mid_removal_still_fails_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only an AppleDouble companion may vanish during removal; anything else fails it closed."""
+
+    tmp_path.chmod(0o700)
+    adapter = CodexSkillIntegration(_resources(), allow_untested=True)
+    target = IntegrationTarget(IntegrationScope.TRUSTED_PROJECT, str(tmp_path))
+    await _apply(adapter, target, IntegrationAction.INSTALL, "50")
+
+    from finishup.adapters.integrations import codex_skill as module
+
+    def listdir(fd: int) -> list[str]:
+        names = os.listdir(fd)
+        return [*names, "notes.md"] if "SKILL.md" in names else names
+
+    volume_os = types.SimpleNamespace(**vars(os))
+    volume_os.listdir = listdir
+    volume_os.supports_fd = {*os.supports_fd, listdir}
+    monkeypatch.setattr(module, "os", volume_os)
+
+    with pytest.raises(IntegrationError) as caught:
+        await _apply(adapter, target, IntegrationAction.REMOVE, "51")
+    assert caught.value.reason is IntegrationReason.WRITE_FAILED
