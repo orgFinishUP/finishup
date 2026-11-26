@@ -8895,7 +8895,9 @@ older tree stays `modified` against the current source and carries preview warni
 `owned_skill_update`. Ordinary reviewed install and remove may replace/remove that owned tree;
 unrecorded edits still require the existing explicit replacement authority. The preview digest
 binds all installed files and the marker, including members no longer shipped by the current
-source. No wire enum or marker schema changes. Claude Code and Cursor retain their independent
+source; files the operating system wrote on its own (`.DS_Store`, AppleDouble `._` files) are not
+installed files and are skipped, as in every managed plugin tree (`is_os_metadata_file`, below;
+ADR-023 §9). No wire enum or marker schema changes. Claude Code and Cursor retain their independent
 marker-consistent plugin update paths.
 
 `HarnessId` is a closed enum whose membership is exactly `claude|codex|cursor`. `HarnessProfile` is the
@@ -9036,10 +9038,15 @@ preview meets the files carries it with `activation_preview_failed`.
 Files the operating system writes into a folder on its own are not files outside the managed
 inventory: `finishup.adapters.integrations.os_metadata.is_os_metadata_file` names them (a regular
 file called `.DS_Store`, or one whose name starts with `._` and is longer than that, judged by
-its last path component only). The Codex project source and its inspection digest, the portable
+its last path component only). The Codex project source and its inspection digest, the Codex
+project skill (`.agents/skills/finishup`: its status, installed digest, recorded-inventory check
+and preview, and the Yoetz-era `.agents/skills/yoetz` ownership check and digest), the portable
 plugin tree, and the Claude Code source and cache and Cursor plugin trees skip them: they never
-make a tree `modified`, never trigger `unmanaged_files`, and are removed with the tree when
-FinishUP replaces or removes it (ADR-023 §9). The prior-render marker check
+make a tree `modified`, never trigger `unmanaged_files` or `modified_copy`, and are removed with
+the tree when FinishUP replaces or removes it (ADR-023 §9). The skill tree's descriptor-relative
+removal also tolerates such a file being gone when its turn comes, because macOS removes a
+`._<name>` companion together with its file or folder on a volume without native extended
+attributes; any other member that vanishes still fails the removal. The prior-render marker check
 (`plugin_tree_matches_marker`) ignores them too, so a Codex cache that `plugin add` copied them
 into is still a replaceable managed render; that cache is read whole, so it differs from the
 render (setup plans a refresh) and its exact-deletion snapshot removes them. A link, or any

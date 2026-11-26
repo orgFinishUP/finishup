@@ -9,6 +9,7 @@ from finishup.adapters.integrations.codex_plugin import (
     plugin_tree_matches_marker,
     render_plugin_install_tree,
 )
+from finishup.adapters.integrations.codex_skill import load_packaged_skill_members
 from finishup.adapters.integrations.cursor_integration import render_cursor_plugin
 from finishup.adapters.integrations.os_metadata import is_os_metadata_file
 from finishup.adapters.integrations.portable_plugin import render_portable_plugin_tree
@@ -42,6 +43,7 @@ def test_finder_and_appledouble_files_are_os_metadata(path: str) -> None:
         "._notes/draft.md",
         ".DS_Store/notes.md",
         ".yoetz-plugin-install.json",
+        ".yoetz-install.json",
         ".mcp.json",
     ],
 )
@@ -56,6 +58,7 @@ def test_no_rendered_managed_member_is_mistaken_for_os_metadata() -> None:
         render_plugin_install_tree(),
         render_plugin_install_tree(codex_version="0.148.0-alpha.6"),
         render_portable_plugin_tree(),
+        dict(load_packaged_skill_members()),
         dict(render_claude_code_plugin().members),
         dict(render_cursor_plugin(PluginFormatProfile.AGENT_PLUGINS_1).members),
         dict(render_cursor_plugin(PluginFormatProfile.CURSOR_PLUGIN_NATIVE).members),

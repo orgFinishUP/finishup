@@ -2,7 +2,13 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
+import os
+import subprocess
+import sys
+import types
+from collections.abc import Generator
 from pathlib import Path
 
 import pytest
@@ -15,6 +21,7 @@ from finishup.adapters.integrations.codex_skill import (
     inspect_destination,
     load_packaged_skill_source,
 )
+from finishup.config.foreign_write import project_root_admitted
 from finishup.domain.values import request_id
 from finishup.ports.integrations import (
     HarnessId,
@@ -711,3 +718,419 @@ def test_an_invalid_resource_manifest_is_refused_every_time(
             load_packaged_skill_source(resources)
         assert caught.value.reason is IntegrationReason.SOURCE_INVALID
     assert module._VALIDATED_RESOURCE_MANIFESTS == {}  # pyright: ignore[reportPrivateUsage]
+
+
+# Files macOS writes into a folder on its own: Finder's ``.DS_Store`` in any folder it shows, and
+# an AppleDouble ``._<name>`` sibling for each file or folder with attributes on a volume that
+# cannot store them (exFAT, FAT, SMB, NFS). Bytes are the real magic numbers of each format.
+_FINDER_BYTES = b"\x00\x00\x00\x01Bud1" + b"\x00" * 24
+_APPLEDOUBLE_BYTES = b"\x00\x05\x16\x07\x00\x02\x00\x00Mac OS X        " + b"\x00" * 16
+_OS_METADATA_FILES = {
+    ".DS_Store": _FINDER_BYTES,
+    "references/.DS_Store": _FINDER_BYTES,
+    "._SKILL.md": _APPLEDOUBLE_BYTES,
+    "._.yoetz-install.json": _APPLEDOUBLE_BYTES,
+    "._references": _APPLEDOUBLE_BYTES,
+    "references/._workflow.md": _APPLEDOUBLE_BYTES,
+}
+
+
+def _write_os_metadata(destination: Path) -> None:
+    for litter, data in _OS_METADATA_FILES.items():
+        (destination / litter).write_bytes(data)
+
+
+def _tree_bytes(destination: Path) -> dict[str, bytes]:
+    return {
+        path.relative_to(destination).as_posix(): path.read_bytes()
+        for path in destination.rglob("*")
+        if path.is_file() and not path.is_symlink()
+    }
+
+
+async def _install_preview(adapter: CodexSkillIntegration, target: IntegrationTarget) -> str:
+    preview = await adapter.preview_skill(
+        HarnessId.CODEX,
+        SkillPreviewCommand(
+            request_id("req_00000000-0000-4000-8000-000000000201"),
+            target,
+            IntegrationAction.INSTALL,
+            False,
+        ),
+    )
+    return preview.preview_digest
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("litter", sorted(_OS_METADATA_FILES))
+async def test_os_metadata_in_the_skill_tree_is_not_owner_content(
+    tmp_path: Path, litter: str
+) -> None:
+    """Finder and AppleDouble files are not files an owner keeps (ADR-023 §9).
+
+    The project skill stays exact with the same digest and preview, so setup neither refuses
+    ``modified_copy`` nor asks the owner to move a file Finder does not show, and removal takes
+    the file with the tree.
+    """
+
+    tmp_path.chmod(0o700)
+    adapter = CodexSkillIntegration(_resources(), allow_untested=True)
+    target = IntegrationTarget(IntegrationScope.TRUSTED_PROJECT, str(tmp_path))
+    await _apply(adapter, target, IntegrationAction.INSTALL, "20")
+    exact = inspect_destination(target, load_packaged_skill_source(_resources()))
+    clean_preview = await _install_preview(adapter, target)
+    destination = tmp_path / ".agents/skills/finishup"
+    (destination / litter).write_bytes(_OS_METADATA_FILES[litter])
+
+    status = await adapter.status_skill(HarnessId.CODEX, SkillStatusCommand(target))
+
+    assert status.state is IntegrationState.INSTALLED_EXACT
+    assert status.installed_digest == exact.installed_digest
+    assert status.file_states == exact.file_states
+    assert status.managed_marker_valid
+    assert await _install_preview(adapter, target) == clean_preview
+
+    await _apply(adapter, target, IntegrationAction.INSTALL, "21")
+    await _apply(adapter, target, IntegrationAction.REMOVE, "22")
+
+    assert not destination.exists()
+    assert list((tmp_path / ".agents/skills").iterdir()) == []
+
+
+@pytest.mark.anyio
+async def test_a_prior_skill_with_os_metadata_still_upgrades_and_disconnects(
+    tmp_path: Path,
+) -> None:
+    """An owned earlier release is upgraded, and its OS metadata goes with the replaced tree."""
+
+    adapter = CodexSkillIntegration(resource_source=_resources(), allow_untested=True)
+    target = IntegrationTarget(IntegrationScope.TRUSTED_PROJECT, str(tmp_path))
+    destination = await _prior_skill(adapter, target)
+    request = request_id("req_00000000-0000-4000-8000-000000000202")
+    command = SkillPreviewCommand(request, target, IntegrationAction.INSTALL, False)
+    clean = await adapter.preview_skill(HarnessId.CODEX, command)
+    _write_os_metadata(destination)
+
+    preview = await adapter.preview_skill(HarnessId.CODEX, command)
+
+    assert preview.state_before is IntegrationState.MODIFIED
+    assert "owned_skill_update" in preview.warnings
+    assert preview.file_changes == clean.file_changes
+    assert preview.preview_digest == clean.preview_digest
+
+    await _apply(adapter, target, IntegrationAction.INSTALL, "23")
+
+    after = inspect_destination(target, load_packaged_skill_source(_resources()))
+    assert after.state is IntegrationState.INSTALLED_EXACT
+    assert not any((destination / litter).exists() for litter in _OS_METADATA_FILES)
+
+    _write_os_metadata(destination)
+    await _apply(adapter, target, IntegrationAction.REMOVE, "24")
+    assert not destination.exists()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("owner_file", ["my-notes.md", "references/my-notes.md"])
+async def test_an_owner_file_beside_os_metadata_still_reads_modified_and_is_kept(
+    tmp_path: Path, owner_file: str
+) -> None:
+    """Ignoring OS metadata never lets install or removal take a file the owner put there."""
+
+    tmp_path.chmod(0o700)
+    adapter = CodexSkillIntegration(_resources(), allow_untested=True)
+    target = IntegrationTarget(IntegrationScope.TRUSTED_PROJECT, str(tmp_path))
+    await _apply(adapter, target, IntegrationAction.INSTALL, "25")
+    destination = tmp_path / ".agents/skills/finishup"
+    _write_os_metadata(destination)
+    (destination / owner_file).write_bytes(b"owner content\n")
+    before = _tree_bytes(destination)
+
+    status = await adapter.status_skill(HarnessId.CODEX, SkillStatusCommand(target))
+    assert status.state is IntegrationState.MODIFIED
+    assert not status.managed_marker_valid
+
+    with pytest.raises(IntegrationError) as install:
+        await _apply(adapter, target, IntegrationAction.INSTALL, "26")
+    assert install.value.reason is IntegrationReason.MODIFIED_COPY
+    with pytest.raises(IntegrationError) as remove:
+        await _apply(adapter, target, IntegrationAction.REMOVE, "27")
+    assert remove.value.reason is IntegrationReason.REMOVE_REFUSED
+
+    assert _tree_bytes(destination) == before
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "name",
+    ["DS_Store", ".DS_Store.txt", "notes._md", "._", "._notes/draft.md", ".ds_store"],
+)
+async def test_names_that_only_resemble_os_metadata_are_owner_content(
+    tmp_path: Path, name: str
+) -> None:
+    tmp_path.chmod(0o700)
+    adapter = CodexSkillIntegration(_resources(), allow_untested=True)
+    target = IntegrationTarget(IntegrationScope.TRUSTED_PROJECT, str(tmp_path))
+    await _apply(adapter, target, IntegrationAction.INSTALL, "28")
+    owner_file = tmp_path / ".agents/skills/finishup" / name
+    owner_file.parent.mkdir(parents=True, exist_ok=True)
+    owner_file.write_bytes(b"owner content\n")
+
+    status = await adapter.status_skill(HarnessId.CODEX, SkillStatusCommand(target))
+    assert status.state is IntegrationState.MODIFIED
+    with pytest.raises(IntegrationError) as caught:
+        await _apply(adapter, target, IntegrationAction.REMOVE, "29")
+
+    assert caught.value.reason is IntegrationReason.REMOVE_REFUSED
+    assert owner_file.read_bytes() == b"owner content\n"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("member", [".DS_Store", "references/._workflow.md", "fifo:._SKILL.md"])
+async def test_a_link_or_special_file_named_like_os_metadata_is_still_unsafe(
+    tmp_path: Path, member: str
+) -> None:
+    """Only a regular file is OS metadata: a link under that name is never followed or removed."""
+
+    tmp_path.chmod(0o700)
+    adapter = CodexSkillIntegration(_resources(), allow_untested=True)
+    target = IntegrationTarget(IntegrationScope.TRUSTED_PROJECT, str(tmp_path))
+    await _apply(adapter, target, IntegrationAction.INSTALL, "30")
+    destination = tmp_path / ".agents/skills/finishup"
+    outside = tmp_path / "outside.txt"
+    outside.write_bytes(b"outside\n")
+    kind, _, name = member.rpartition(":")
+    planted = destination / name
+    if kind == "fifo":
+        os.mkfifo(planted, 0o600)
+    else:
+        planted.symlink_to(outside)
+
+    with pytest.raises(IntegrationError) as status:
+        await adapter.status_skill(HarnessId.CODEX, SkillStatusCommand(target))
+    assert status.value.reason is IntegrationReason.TARGET_UNSAFE
+    with pytest.raises(IntegrationError) as remove:
+        await _apply(adapter, target, IntegrationAction.REMOVE, "31")
+    assert remove.value.reason is IntegrationReason.TARGET_UNSAFE
+
+    assert planted.is_symlink() or planted.is_fifo()
+    assert outside.read_bytes() == b"outside\n"
+    assert (destination / "SKILL.md").is_file()
+
+
+@pytest.mark.anyio
+async def test_os_metadata_in_the_legacy_skill_tree_keeps_it_owned(tmp_path: Path) -> None:
+    """The Yoetz-era tree is still migrated when Finder or macOS wrote into it (ADR-048)."""
+
+    tmp_path.chmod(0o700)
+    adapter = CodexSkillIntegration(_resources(), allow_untested=True)
+    target = IntegrationTarget(IntegrationScope.TRUSTED_PROJECT, str(tmp_path))
+    legacy = await _legacy_skill_tree(adapter, tmp_path, target)
+    source = load_packaged_skill_source(_resources())
+    before = inspect_destination(target, source)
+    _write_os_metadata(legacy)
+
+    after = inspect_destination(target, source)
+
+    assert after.legacy_tree == "owned"
+    assert after.legacy_digest == before.legacy_digest
+
+    await _apply(adapter, target, IntegrationAction.INSTALL, "32")
+
+    assert not legacy.exists()
+    assert inspect_destination(target, source).state is IntegrationState.INSTALLED_EXACT
+
+
+@pytest.mark.anyio
+async def test_a_skill_folder_holding_only_os_metadata_reads_as_an_empty_one(
+    tmp_path: Path,
+) -> None:
+    tmp_path.chmod(0o700)
+    destination = tmp_path / ".agents/skills/finishup"
+    (destination / "references").mkdir(parents=True, mode=0o700)
+    target = IntegrationTarget(IntegrationScope.TRUSTED_PROJECT, str(tmp_path))
+    source = load_packaged_skill_source(_resources())
+    empty = inspect_destination(target, source)
+    _write_os_metadata(destination)
+
+    litter = inspect_destination(target, source)
+
+    assert litter.state is empty.state
+    assert litter.installed_digest == empty.installed_digest is None
+    assert litter.file_states == empty.file_states
+    assert litter.managed_marker_valid is empty.managed_marker_valid is False
+
+
+def _model_a_volume_without_native_xattrs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The adapter's ``os`` as macOS behaves on exFAT, FAT, NFS or an SMB share without streams.
+
+    There macOS keeps attributes in an AppleDouble ``._<name>`` companion, made after its file, so
+    a volume that lists entries in creation order (FAT does) lists it after its file. Removing a
+    file or folder removes its companion with it (xnu's AppleDouble handling in ``VNOP_REMOVE``
+    and ``VNOP_RMDIR``). The model lists every companion last, the order that exposes it.
+    """
+
+    from finishup.adapters.integrations import codex_skill as module
+
+    def listdir(fd: int) -> list[str]:
+        return sorted(os.listdir(fd), key=lambda name: (name.startswith("._"), name))
+
+    def drop_companion(name: str, dir_fd: int | None) -> None:
+        if not name.startswith("._"):
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink("._" + name, dir_fd=dir_fd)
+
+    def unlink(name: str, *, dir_fd: int | None = None) -> None:
+        os.unlink(name, dir_fd=dir_fd)
+        drop_companion(name, dir_fd)
+
+    def rmdir(name: str, *, dir_fd: int | None = None) -> None:
+        os.rmdir(name, dir_fd=dir_fd)
+        drop_companion(name, dir_fd)
+
+    volume_os = types.SimpleNamespace(**vars(os))
+    volume_os.listdir = listdir
+    volume_os.unlink = unlink
+    volume_os.rmdir = rmdir
+    volume_os.supports_dir_fd = {*os.supports_dir_fd, unlink, rmdir}
+    volume_os.supports_fd = {*os.supports_fd, listdir}
+    monkeypatch.setattr(module, "os", volume_os)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("operation", ["remove", "upgrade"])
+async def test_removal_survives_macos_taking_appledouble_companions_with_their_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str
+) -> None:
+    """A companion listed after its file is already gone when its turn comes, which is fine."""
+
+    tmp_path.chmod(0o700)
+    adapter = CodexSkillIntegration(_resources(), allow_untested=True)
+    target = IntegrationTarget(IntegrationScope.TRUSTED_PROJECT, str(tmp_path))
+    if operation == "upgrade":
+        destination = await _prior_skill(adapter, target)
+    else:
+        await _apply(adapter, target, IntegrationAction.INSTALL, "33")
+        destination = tmp_path / ".agents/skills/finishup"
+    _write_os_metadata(destination)
+    _model_a_volume_without_native_xattrs(monkeypatch)
+
+    if operation == "upgrade":
+        await _apply(adapter, target, IntegrationAction.INSTALL, "34")
+        after = inspect_destination(target, load_packaged_skill_source(_resources()))
+        assert after.state is IntegrationState.INSTALLED_EXACT
+        assert sorted(path.name for path in destination.parent.iterdir()) == ["finishup"]
+    else:
+        await _apply(adapter, target, IntegrationAction.REMOVE, "35")
+        assert list(destination.parent.iterdir()) == []
+
+
+@contextlib.contextmanager
+def _scratch_fat_volume(tmp_path: Path) -> Generator[Path]:
+    """A scratch FAT disk image mounted beneath ``tmp_path``; skips when macOS cannot make one."""
+
+    image = tmp_path / "scratch.dmg"
+    volume = tmp_path / "volume"
+    volume.mkdir(mode=0o700)
+    create = ("hdiutil", "create", "-quiet", "-size", "8m", "-fs", "MS-DOS", "-volname", "FUSKILL")
+    if subprocess.run((*create, str(image)), check=False).returncode != 0:
+        pytest.skip("hdiutil could not create a scratch FAT image on this machine")
+    attach = ("hdiutil", "attach", "-quiet", "-nobrowse", "-mountpoint", str(volume), str(image))
+    if subprocess.run(attach, check=False).returncode != 0:
+        pytest.skip("hdiutil could not attach a scratch FAT volume on this machine")
+    try:
+        yield volume
+    finally:
+        subprocess.run(("hdiutil", "detach", "-quiet", "-force", str(volume)), check=False)
+
+
+def _set_attribute(path: Path) -> None:
+    subprocess.run(("xattr", "-w", "com.finishup.test", "1", str(path)), check=True)
+
+
+@pytest.mark.anyio
+@pytest.mark.skipif(sys.platform != "darwin", reason="AppleDouble files are written by macOS")
+async def test_a_real_appledouble_file_from_macos_is_not_owner_content(tmp_path: Path) -> None:
+    """macOS itself writes ``._<name>`` beside a file whose attributes a FAT volume cannot hold.
+
+    The file is produced by the operating system on a scratch FAT disk image, then placed in the
+    installed skill the way copying a folder from such a volume does.
+    """
+
+    tmp_path.chmod(0o700)
+    with _scratch_fat_volume(tmp_path) as volume:
+        probe = volume / "SKILL.md"
+        probe.write_bytes(b"# probe\n")
+        _set_attribute(probe)
+        sibling = volume / "._SKILL.md"
+        assert sibling.is_file(), "macOS did not write an AppleDouble sibling on the FAT volume"
+        appledouble = sibling.read_bytes()
+    assert appledouble.startswith(b"\x00\x05\x16\x07")
+
+    adapter = CodexSkillIntegration(_resources(), allow_untested=True)
+    target = IntegrationTarget(IntegrationScope.TRUSTED_PROJECT, str(tmp_path))
+    await _apply(adapter, target, IntegrationAction.INSTALL, "36")
+    exact = inspect_destination(target, load_packaged_skill_source(_resources()))
+    litter = tmp_path / ".agents/skills/finishup/._SKILL.md"
+    litter.write_bytes(appledouble)
+
+    status = await adapter.status_skill(HarnessId.CODEX, SkillStatusCommand(target))
+    assert status.state is IntegrationState.INSTALLED_EXACT
+    assert status.installed_digest == exact.installed_digest
+    await _apply(adapter, target, IntegrationAction.REMOVE, "37")
+    assert not litter.exists()
+
+
+@pytest.mark.anyio
+@pytest.mark.skipif(sys.platform != "darwin", reason="AppleDouble files are written by macOS")
+async def test_a_skill_on_a_fat_volume_keeps_exact_and_is_removed_with_companions(
+    tmp_path: Path,
+) -> None:
+    """On the volume itself macOS writes the companions and removes each with its file."""
+
+    tmp_path.chmod(0o700)
+    with _scratch_fat_volume(tmp_path) as volume:
+        project = volume / "project"
+        project.mkdir(mode=0o700)
+        if not project_root_admitted(project.stat()):
+            pytest.skip("this macOS mounts FAT volumes so other accounts can write them")
+        adapter = CodexSkillIntegration(_resources(), allow_untested=True)
+        target = IntegrationTarget(IntegrationScope.TRUSTED_PROJECT, str(project))
+        await _apply(adapter, target, IntegrationAction.INSTALL, "38")
+        destination = project / ".agents/skills/finishup"
+        for member in ("SKILL.md", ".yoetz-install.json", "references", "references/workflow.md"):
+            _set_attribute(destination / member)
+        assert (destination / "._SKILL.md").is_file()
+
+        status = await adapter.status_skill(HarnessId.CODEX, SkillStatusCommand(target))
+        assert status.state is IntegrationState.INSTALLED_EXACT
+
+        await _apply(adapter, target, IntegrationAction.REMOVE, "39")
+        assert not destination.exists()
+        assert not [name for name in os.listdir(destination.parent) if name.startswith(".yoetz.")]
+
+
+@pytest.mark.anyio
+async def test_a_member_other_than_os_metadata_that_vanishes_mid_removal_still_fails_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only an AppleDouble companion may vanish during removal; anything else fails it closed."""
+
+    tmp_path.chmod(0o700)
+    adapter = CodexSkillIntegration(_resources(), allow_untested=True)
+    target = IntegrationTarget(IntegrationScope.TRUSTED_PROJECT, str(tmp_path))
+    await _apply(adapter, target, IntegrationAction.INSTALL, "50")
+
+    from finishup.adapters.integrations import codex_skill as module
+
+    def listdir(fd: int) -> list[str]:
+        names = os.listdir(fd)
+        return [*names, "notes.md"] if "SKILL.md" in names else names
+
+    volume_os = types.SimpleNamespace(**vars(os))
+    volume_os.listdir = listdir
+    volume_os.supports_fd = {*os.supports_fd, listdir}
+    monkeypatch.setattr(module, "os", volume_os)
+
+    with pytest.raises(IntegrationError) as caught:
+        await _apply(adapter, target, IntegrationAction.REMOVE, "51")
+    assert caught.value.reason is IntegrationReason.WRITE_FAILED
