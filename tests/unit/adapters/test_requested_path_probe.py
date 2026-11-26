@@ -5,10 +5,13 @@ from __future__ import annotations
 import asyncio
 import os
 import subprocess
+import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
+from finishup.adapters import git_change_capture as capture_module
 from finishup.adapters.git_change_capture import GitChangeCaptureAdapter
 from finishup.application.check_change import requested_output_states
 from finishup.domain.events import (
@@ -557,3 +560,93 @@ def test_info_exclude_is_recognized_under_any_root_name(tmp_path: Path, name: st
     )
 
     assert (probe.ignored, probe.ignore_source, probe.ignore_file) == (True, "info_exclude", None)
+
+
+# The same folder name spelled two ways: decomposed (``e`` + U+0301, as a macOS file system or
+# input method may hand it over) and composed (U+00E9, as a ``.gitignore`` usually holds it).
+_DECOMPOSED = "cafe\u0301"
+_COMPOSED = "caf\u00e9"
+
+
+def _set_precompose_unicode(repository: Path, setting: str | None) -> None:
+    # ``git init`` writes ``true`` on macOS and nothing elsewhere; set it the same way everywhere.
+    _git(repository, "config", "core.precomposeUnicode", setting or "true")
+    if setting is None:
+        _git(repository, "config", "--unset", "core.precomposeUnicode")
+
+
+@pytest.mark.parametrize(
+    ("macos", "setting", "sent"),
+    [
+        (True, "true", _COMPOSED),
+        (True, "false", _DECOMPOSED),
+        (True, None, _DECOMPOSED),
+        (False, "true", _DECOMPOSED),
+    ],
+)
+def test_the_rule_source_query_sends_the_path_git_composes_from_its_arguments(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, macos: bool, setting: str | None, sent: str
+) -> None:
+    """macOS regression: Git there composes an argument path but reads ``--stdin`` as sent.
+
+    With ``core.precomposeUnicode`` (which ``git init`` sets on macOS) the quiet query is answered
+    for the composed spelling of a decomposed path, so the ``-v -z --stdin`` query that names the
+    rule must be sent that spelling too, or it matches nothing and the rule reads as outside the
+    repository. Git elsewhere never composes, so there the path is sent unchanged and the setting
+    is not even read.
+    """
+
+    repository = _repository(tmp_path)
+    _set_precompose_unicode(repository, setting)
+    (repository / ".gitignore").write_text("checkpoints/\ncaf*/\n", encoding="utf-8")
+    folder = repository / _DECOMPOSED
+    folder.mkdir()
+    (folder / "x").write_text("x\n", encoding="utf-8")
+    monkeypatch.setattr(capture_module, "_git_precomposes_arguments", lambda: macos)
+    calls: list[tuple[tuple[str, ...], bytes | None]] = []
+    real = capture_module.run_read_only_git
+
+    def run(*args: Any, **kwargs: Any) -> tuple[int, bytes]:
+        calls.append((tuple(args[1]), kwargs.get("stdin_bytes")))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(capture_module, "run_read_only_git", run)
+
+    (probe,) = GitChangeCaptureAdapter().probe_requested_paths(
+        os.fspath(repository), (f"{_DECOMPOSED}/x",)
+    )
+
+    assert (probe.ignored, probe.ignore_source, probe.ignore_file) == (
+        True,
+        "repository_file",
+        ".gitignore",
+    )
+    assert [stdin for arguments, stdin in calls if "--stdin" in arguments] == [
+        f"{sent}/x".encode() + b"\0"
+    ]
+    assert any("core.precomposeUnicode" in arguments for arguments, _ in calls) is macos
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="only Git for macOS composes argument paths")
+def test_macos_names_the_rule_file_for_a_decomposed_path(tmp_path: Path) -> None:
+    """Real macOS Git: a decomposed spelling of a folder a composed rule ignores names that rule.
+
+    Before the fix the decomposed spelling was reported ignored by a rule outside the repository
+    (``outside_repository``), while the composed one named ``.gitignore``.
+    """
+
+    repository = _repository(tmp_path)
+    _set_precompose_unicode(repository, "true")
+    (repository / ".gitignore").write_text(f"checkpoints/\n{_COMPOSED}/\n", encoding="utf-8")
+    folder = repository / _DECOMPOSED
+    folder.mkdir()
+    (folder / "x").write_text("x\n", encoding="utf-8")
+
+    probes = GitChangeCaptureAdapter().probe_requested_paths(
+        os.fspath(repository), (f"{_DECOMPOSED}/x", f"{_COMPOSED}/x")
+    )
+
+    assert [(probe.ignored, probe.ignore_source, probe.ignore_file) for probe in probes] == [
+        (True, "repository_file", ".gitignore"),
+        (True, "repository_file", ".gitignore"),
+    ]

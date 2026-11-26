@@ -30,7 +30,9 @@ import re
 import shutil
 import stat
 import subprocess
+import sys
 import time
+import unicodedata
 import zlib
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
@@ -1289,7 +1291,8 @@ class GitChangeCaptureAdapter:
         one must lie under it. Ignore state is Git's own answer (``git check-ignore``), which
         honours ``.gitignore``, ``.git/info/exclude``, a repository ``core.excludesFile`` and the
         owner's global ignore file, and never reports a tracked file. Paths are only ever passed
-        as arguments after ``--`` to the hardened runner; none is returned or logged.
+        to the hardened runner, as arguments after ``--`` or as its ``--stdin`` input; none is
+        returned or logged.
         """
 
         if len(values) > _MAX_REQUESTED_PATH_PROBES:
@@ -1311,6 +1314,8 @@ class GitChangeCaptureAdapter:
         ignored: set[bytes] = set()
         unknown: set[bytes] = set()
         sources: dict[bytes, bytes] = {}
+        # Read at most once, and only on macOS for a non-ASCII path Git proved ignored.
+        precomposes: bool | None = None
         # The root is never ignored by Git, so it is not queried.
         queried = [
             path for path in inside if identities[path] != _BLOCKED and path != _ROOT_RELATIVE
@@ -1343,15 +1348,25 @@ class GitChangeCaptureAdapter:
                 # runs only for a path the quiet query already proved ignored. With ``-z`` (which
                 # Git allows only with ``--stdin``) the rule's source is the first NUL-separated
                 # field, unquoted, so a rule file whose path holds a colon, a quote, or non-ASCII
-                # bytes keeps the exact name the change capture lists it under.
+                # bytes keeps the exact name the change capture lists it under. Git for macOS
+                # composes a decomposed argument path (``core.precomposeUnicode``) but reads
+                # ``--stdin`` as sent, so the path goes in the spelling the quiet query was
+                # answered for; sent decomposed it matches no rule and its source reads as
+                # ``outside_repository``.
                 try:
+                    queried_path = path
+                    if _git_precomposes_arguments() and not path.isascii():
+                        if precomposes is None:
+                            precomposes = self._precomposes_unicode(pinned, deadline)
+                        if precomposes:
+                            queried_path = _precomposed(path)
                     _, verbose = self._git(
                         pinned,
                         (*config, "check-ignore", "-v", "-z", "--stdin"),
                         deadline=deadline,
                         limit=8_192,
                         accepted=frozenset({0, 1}),
-                        stdin_bytes=path + b"\0",
+                        stdin_bytes=queried_path + b"\0",
                     )
                 except (ValueError, ChangeCaptureUnavailable):
                     verbose = b""
@@ -3497,6 +3512,23 @@ class GitChangeCaptureAdapter:
             path if os.path.isabs(path) else os.path.join(pinned.root, path)
         )
 
+    def _precomposes_unicode(self, pinned: _Workspace, deadline: float) -> bool:
+        """Whether Git composes a decomposed Unicode argument path in this repository.
+
+        Git for macOS does so when ``core.precomposeUnicode`` is true, which ``git init`` writes
+        there; unset is false. The runner reads no system or global configuration, so this is
+        the value every other call through it acts on.
+        """
+
+        code, raw = self._git(
+            pinned,
+            ("config", "--bool", "--get", "core.precomposeUnicode"),
+            deadline=deadline,
+            limit=64,
+            accepted=frozenset({0, 1}),
+        )
+        return code == 0 and raw.strip() == b"true"
+
     # --- rendering ---------------------------------------------------------------------------
 
     def _render(
@@ -5051,6 +5083,27 @@ def _ran_out(exc: ChangeCaptureUnavailable, deadline: float) -> bool:
     """A Git call failed because the deadline ran out, never because the root was replaced."""
 
     return exc.reason == "git_failed" and _expired(deadline)
+
+
+def _git_precomposes_arguments() -> bool:
+    """True where Git acts on ``core.precomposeUnicode``: only Git for macOS composes paths."""
+
+    return sys.platform == "darwin"
+
+
+def _precomposed(path: bytes) -> bytes:
+    """``path`` as Git for macOS composes an argument path under ``core.precomposeUnicode``.
+
+    Git composes decomposed UTF-8 (``e`` + U+0301 becomes U+00E9), the Unicode NFC form of what
+    a macOS file system or input method decomposes; bytes that are not UTF-8 stay as they are,
+    as Git leaves them.
+    """
+
+    try:
+        text = path.decode("utf-8", errors="strict")
+    except UnicodeDecodeError:
+        return path
+    return unicodedata.normalize("NFC", text).encode("utf-8")
 
 
 def _global_excludes_file(deadline: float) -> str | None:
