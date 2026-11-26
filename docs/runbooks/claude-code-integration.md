@@ -1718,6 +1718,16 @@ tree; interrupted stage/rollback material surfaces in status as `recovery_requir
 inside the marketplace source makes it `modified` whatever its name (non-ASCII UTF-8 names included,
 #1386); a name that is not valid UTF-8 is refused `target_unsafe`.
 
+The one exception is a file the operating system writes on its own (ADR-023 §9 amendment). On
+macOS, Finder writes `.DS_Store` into any folder it shows, including a hidden one once hidden files
+are shown, and macOS writes AppleDouble `._<name>` files beside files on exFAT, FAT, SMB and NFS
+volumes. A regular file with exactly such a name in the marketplace source or in Claude Code's
+cache copy of the plugin (which may carry it over from the source) changes no status or digest and
+never blocks update or removal; it is removed with the tree. A file beside it such as
+`.DS_Store.txt` or `notes._md` is still yours and still makes the source `modified`, and a link
+under such a name is still `target_unsafe`. The rule is the same on every platform and matches the
+Codex and Cursor plugin trees.
+
 ## Proof checklist
 
 Claude Code is not an allowlisted `finishup consent authorize` attestation client in v0.1. It may show

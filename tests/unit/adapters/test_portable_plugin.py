@@ -1190,6 +1190,111 @@ async def test_owner_non_ascii_file_in_a_managed_tree_reads_modified_and_blocks_
     assert added.read_bytes() == b"owner file\n"
 
 
+# Files macOS writes into a folder on its own: Finder's ``.DS_Store`` and AppleDouble ``._`` files.
+_OS_METADATA_FILES = {
+    ".DS_Store": b"\x00\x00\x00\x01Bud1",
+    "skills/finishup/._SKILL.md": b"\x00\x05\x16\x07\x00\x02\x00\x00",
+}
+
+
+async def _install_portable(
+    adapter: PortablePluginArtifactAdapter, target: ArtifactTarget, number: int
+) -> None:
+    preview = await adapter.preview_artifact(
+        request_id(_request(number)), target, PluginArtifactAction.INSTALL
+    )
+    await adapter.install_artifact(
+        PluginArtifactApplyCommand(
+            request_id(_request(number)),
+            target,
+            PluginArtifactAction.INSTALL,
+            preview.preview_digest,
+            _setup_authority(preview.preview_digest),
+        )
+    )
+
+
+@pytest.mark.anyio
+async def test_os_metadata_in_a_managed_tree_is_not_owner_content_and_goes_with_it(
+    tmp_path: Path,
+) -> None:
+    """ADR-023 §9: OS-written metadata neither changes the status nor blocks removal."""
+
+    target = _target(tmp_path)
+    adapter = PortablePluginArtifactAdapter(
+        review=_SetupAuthority(), mcp_owner_state=McpOwnershipState.EXTERNAL
+    )
+    await _install_portable(adapter, target, 43)
+    exact = await adapter.status_artifact(PluginArtifactStatusCommand(target))
+    destination = tmp_path / AGENT_PLUGIN_ROOT
+    for litter, data in _OS_METADATA_FILES.items():
+        (destination / litter).write_bytes(data)
+
+    status = await adapter.status_artifact(PluginArtifactStatusCommand(target))
+    assert status.state is PluginArtifactState.PORTABLE_EXACT
+    assert status.installed_digest == exact.installed_digest
+
+    preview = await adapter.preview_artifact(
+        request_id(_request(44)), target, PluginArtifactAction.REMOVE
+    )
+    await adapter.remove_artifact(
+        PluginArtifactApplyCommand(
+            request_id(_request(44)),
+            target,
+            PluginArtifactAction.REMOVE,
+            preview.preview_digest,
+            _setup_authority(preview.preview_digest),
+        )
+    )
+    assert not destination.exists()
+
+
+@pytest.mark.anyio
+async def test_an_owner_file_beside_os_metadata_still_reads_modified_and_blocks_remove(
+    tmp_path: Path,
+) -> None:
+    target = _target(tmp_path)
+    adapter = PortablePluginArtifactAdapter(
+        review=_SetupAuthority(), mcp_owner_state=McpOwnershipState.EXTERNAL
+    )
+    await _install_portable(adapter, target, 45)
+    destination = tmp_path / AGENT_PLUGIN_ROOT
+    for litter, data in _OS_METADATA_FILES.items():
+        (destination / litter).write_bytes(data)
+    owner_file = destination / "skills/finishup/notes.md"
+    owner_file.write_bytes(b"owner file\n")
+
+    status = await adapter.status_artifact(PluginArtifactStatusCommand(target))
+    assert status.state is PluginArtifactState.MODIFIED
+    with pytest.raises(PluginArtifactError) as caught:
+        await adapter.preview_artifact(
+            request_id(_request(46)), target, PluginArtifactAction.REMOVE
+        )
+    assert caught.value.reason is PluginArtifactReason.REMOVE_REFUSED
+    assert owner_file.read_bytes() == b"owner file\n"
+    assert all(
+        (destination / litter).read_bytes() == data for litter, data in _OS_METADATA_FILES.items()
+    )
+
+
+@pytest.mark.anyio
+async def test_a_codex_native_tree_with_os_metadata_reads_native_managed(tmp_path: Path) -> None:
+    """The Codex lane and this lane judge the same directory the same way."""
+
+    target = _target(tmp_path)
+    install_plugin(
+        IntegrationTarget(IntegrationScope.TRUSTED_PROJECT, str(tmp_path)),
+        allow_untested=True,
+    )
+    for litter, data in _OS_METADATA_FILES.items():
+        (tmp_path / AGENT_PLUGIN_ROOT / litter).write_bytes(data)
+    adapter = PortablePluginArtifactAdapter(review=_SetupAuthority())
+
+    status = await adapter.status_artifact(PluginArtifactStatusCommand(target))
+
+    assert status.state is PluginArtifactState.NATIVE_MANAGED
+
+
 @pytest.mark.anyio
 async def test_legacy_tree_with_a_non_ascii_member_reads_foreign(tmp_path: Path) -> None:
     target = _target(tmp_path)

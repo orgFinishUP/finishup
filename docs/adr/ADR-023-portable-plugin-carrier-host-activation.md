@@ -151,6 +151,24 @@ becomes host-derived.
    or removal of unmanaged or modified content; failure-atomic replacement with conservative
    recovery; installed-byte verification; and no inference from filesystem presence to activation.
 
+   **Amendment (2026-11-26): operating-system metadata is not unmanaged content.** macOS Finder
+   writes `.DS_Store` into any folder it shows, and on volumes without native extended
+   attributes (exFAT, FAT, SMB, NFS) macOS writes an AppleDouble `._<name>` sibling for each
+   file or folder with attributes. Nobody chose to keep either in a managed tree, and Finder
+   hides both, so a refusal asking the owner to move them out cannot be followed. A regular file
+   with one of those names (judged by its last path component; one shared predicate,
+   `os_metadata.is_os_metadata_file`) is therefore not owner content in any managed plugin tree:
+   the Codex project source, the portable tree, the Claude Code source and cache, the Cursor
+   tree, and the prior-render marker check that also judges the Codex cache. It never counts as
+   an unmanaged or modified file, never blocks install, refresh, replacement or removal, and
+   goes with the tree when FinishUP replaces or removes it as a whole, which was the outcome
+   before unmanaged files were refused (#1382). It enters no inspection or preview digest,
+   except the Codex cache's: that tree is read whole so its exact-deletion snapshot covers the
+   file, which makes setup plan a cache refresh. Every other file keeps this decision's
+   protection unchanged: an owner file beside such metadata still refuses replacement and
+   removal, and both are kept. A link or other non-regular member under such a name is still
+   unsafe and never followed.
+
 10. **Proof facets stay independent.** Public and setup status keep these facets separate, and no
     document, status field, or summary may imply one from another: source, rendered artifact,
     installed bytes, host discovery, host activation, skill delivery, MCP owner, MCP binding, MCP

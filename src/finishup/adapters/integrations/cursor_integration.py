@@ -40,6 +40,7 @@ from finishup.adapters.integrations.launcher_probe import (
     compare_launcher_identity,
 )
 from finishup.adapters.integrations.legacy_launchers import launcher_aliases, recorded_launcher
+from finishup.adapters.integrations.os_metadata import is_os_metadata_file
 from finishup.adapters.integrations.portable_plugin import (
     PackagedPortableResources,
     RenderedPortablePlugin,
@@ -1068,6 +1069,12 @@ def _ensure_private_path(path: Path) -> None:
 
 
 def _safe_tree(root: Path) -> dict[str, bytes]:
+    """Every regular file in the tree, skipping files the operating system wrote on its own.
+
+    ``.DS_Store`` and AppleDouble ``._`` files are not owner content (ADR-023 §9): they never
+    change a state or digest, and they go with the tree when it is replaced or removed.
+    """
+
     result: dict[str, bytes] = {}
     # A name that is not valid UTF-8 (possible on Linux) cannot be named in a digest, so the
     # tree is refused as unsafe rather than letting a codec error escape the closed reasons.
@@ -1083,6 +1090,8 @@ def _safe_tree(root: Path) -> dict[str, bytes]:
         if path.is_symlink():
             raise _error(PluginArtifactReason.TARGET_UNSAFE)
         if path.is_dir():
+            continue
+        if path.is_file() and is_os_metadata_file(path.name):
             continue
         if (
             not path.is_file()

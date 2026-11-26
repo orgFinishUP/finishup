@@ -258,6 +258,28 @@ def test_binding_to_a_vanished_project_is_moved_to_the_connecting_one(tmp_path: 
     assert (home / "config.toml").read_text(encoding="utf-8").count("[marketplaces.finishup]") == 1
 
 
+def test_os_metadata_in_the_anchor_plugin_source_keeps_it_serving(tmp_path: Path) -> None:
+    """Finder or AppleDouble files in the anchor's plugin directory are not owner content.
+
+    The anchor still serves the shared marketplace, so a second project joins it rather than
+    taking a binding the first project's sessions read.
+    """
+
+    home = _home(tmp_path)
+    target_a, root_a = _project(tmp_path, "a")
+    target_b, _root_b = _project(tmp_path, "b")
+    _connect(target_a, home)
+    source_a = root_a / ".agents/plugins/finishup"
+    (source_a / ".DS_Store").write_bytes(b"\x00\x00\x00\x01Bud1")
+    (source_a / "skills/finishup/._SKILL.md").write_bytes(b"\x00\x05\x16\x07\x00\x02\x00\x00")
+
+    _connect(target_b, home)
+
+    assert _binding(home) == str(root_a)
+    assert inspect_activation(target_a, codex_home=home).state is ActivationState.ACTIVE
+    assert inspect_activation(target_b, codex_home=home).state is ActivationState.ACTIVE
+
+
 def test_same_project_under_a_symlinked_path_is_refused(tmp_path: Path) -> None:
     home = _home(tmp_path)
     target, root = _project(tmp_path, "real")

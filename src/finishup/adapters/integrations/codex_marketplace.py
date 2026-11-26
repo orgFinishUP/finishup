@@ -57,6 +57,7 @@ from finishup.adapters.integrations.host_projects import (
     same_directory,
     write_connected_projects,
 )
+from finishup.adapters.integrations.os_metadata import is_os_metadata_file
 from finishup.adapters.integrations.toml_tables import (
     append_table_block,
     exact_table_span,
@@ -1063,8 +1064,9 @@ def _anchor_manifest_state(anchor: Path) -> Literal["serves", "missing", "foreig
         if source.is_symlink() or not source.is_dir():
             return "foreign"
         # Any managed render that byte-matches its own install marker (which inventories the
-        # descriptor) serves; an edited or invalid descriptor does not.
-        managed = plugin_tree_matches_marker(_read_managed_tree(source))
+        # descriptor) serves; an edited or invalid descriptor does not. OS-written metadata in
+        # the project source is not part of the render.
+        managed = plugin_tree_matches_marker(_read_managed_tree(source, project_source=True))
     except (IntegrationError, OSError):
         return "foreign"
     return "serves" if managed else "foreign"
@@ -1403,8 +1405,12 @@ def _plugin_source_installed(target: IntegrationTarget, *, codex_version: str) -
     )
 
 
-def _read_managed_tree(root: Path) -> dict[str, bytes]:
-    """Read one managed tree through the shared bounded, no-follow descriptor walker."""
+def _read_managed_tree(root: Path, *, project_source: bool = False) -> dict[str, bytes]:
+    """Read one managed tree through the shared bounded, no-follow descriptor walker.
+
+    ``project_source`` reads a project's ``.agents/plugins/finishup`` and skips files the
+    operating system wrote there on its own; a cache tree is read whole.
+    """
 
     if root.is_symlink():
         raise _error(IntegrationReason.TARGET_UNSAFE)
@@ -1414,7 +1420,7 @@ def _read_managed_tree(root: Path) -> dict[str, bytes]:
         raise _error(IntegrationReason.TARGET_UNSAFE) from exc
     try:
         _owned_stat_not_writable(os.fstat(descriptor), directory=True)
-        return _read_managed_tree_fd(descriptor)
+        return _read_managed_tree_fd(descriptor, skip_os_metadata=project_source)
     finally:
         os.close(descriptor)
 
@@ -1449,8 +1455,9 @@ def _source_cache_members(target: IntegrationTarget, *, codex_version: str) -> d
         # committed source, the other renderer variant, or an older marker-bound
         # render), then bind the preview to the intended version-specific bytes.
         # Apply still requires an exact current renderer variant at its first
-        # source fence before any mutation.
-        installed = _read_managed_tree(source)
+        # source fence before any mutation. OS-written metadata is not read: it is
+        # not owner content and source install removes it with the tree.
+        installed = _read_managed_tree(source, project_source=True)
         if plugin_tree_matches_marker(installed):
             return expected
         # Files outside the managed inventory are owner content the source install refuses
@@ -1468,6 +1475,9 @@ def _source_cache_members(target: IntegrationTarget, *, codex_version: str) -> d
         if candidate.is_dir():
             _owned_not_writable(candidate, directory=True)
         elif candidate.is_file():
+            if is_os_metadata_file(candidate.name):
+                # Never read and never cached, as in the inspection that found the tree exact.
+                continue
             _owned_not_writable(candidate, directory=False)
             actual_paths.add(relative)
         else:
@@ -3237,7 +3247,7 @@ def _bounded_directory_names(directory_fd: int) -> list[str]:
     return sorted(names, key=lambda name: os.fsencode(name))
 
 
-def _read_managed_tree_fd(root_fd: int) -> dict[str, bytes]:
+def _read_managed_tree_fd(root_fd: int, *, skip_os_metadata: bool = False) -> dict[str, bytes]:
     members: dict[str, bytes] = {}
     file_count = 0
     entry_count = 0
@@ -3274,6 +3284,8 @@ def _read_managed_tree_fd(root_fd: int) -> dict[str, bytes]:
                     walk(child_fd, relative, depth + 1)
                 finally:
                     os.close(child_fd)
+                continue
+            if skip_os_metadata and stat.S_ISREG(facts.st_mode) and is_os_metadata_file(name):
                 continue
             _owned_stat_not_writable(facts, directory=False)
             file_count += 1

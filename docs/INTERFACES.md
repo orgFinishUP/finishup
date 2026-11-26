@@ -9033,6 +9033,17 @@ continuation is `plugin_unmanaged_files_continuation(project)`, a fixed sentence
 Codex plan brings it in `RuntimeError_.recovery`, which the terminal interface shows); the
 historical wizard carries it with `plugin_install_failed`, and an approved apply whose second
 preview meets the files carries it with `activation_preview_failed`.
+Files the operating system writes into a folder on its own are not files outside the managed
+inventory: `finishup.adapters.integrations.os_metadata.is_os_metadata_file` names them (a regular
+file called `.DS_Store`, or one whose name starts with `._` and is longer than that, judged by
+its last path component only). The Codex project source and its inspection digest, the portable
+plugin tree, and the Claude Code source and cache and Cursor plugin trees skip them: they never
+make a tree `modified`, never trigger `unmanaged_files`, and are removed with the tree when
+FinishUP replaces or removes it (ADR-023 §9). The prior-render marker check
+(`plugin_tree_matches_marker`) ignores them too, so a Codex cache that `plugin add` copied them
+into is still a replaceable managed render; that cache is read whole, so it differs from the
+render (setup plans a refresh) and its exact-deletion snapshot removes them. A link, or any
+non-regular member, under such a name stays `target_unsafe`.
 MCP server registration is a sibling port, never an `IntegrationsPort` overload (ADR-012).
 `HarnessMcpPort` methods are `status_registration`, `observe_registration`, `preview_registration`,
 `apply_registration`, `preview_unregistration`, and `apply_unregistration`, each taking a

@@ -2087,6 +2087,80 @@ def test_foreign_member_with_any_utf8_name_is_classified_modified(
     assert member.read_bytes() == b"mine\n"
 
 
+# Files macOS writes into a folder on its own: Finder's ``.DS_Store`` and AppleDouble ``._`` files.
+_OS_METADATA_FILES = {
+    ".DS_Store": b"\x00\x00\x00\x01Bud1",
+    "skills/finishup/._SKILL.md": b"\x00\x05\x16\x07\x00\x02\x00\x00",
+}
+
+
+def test_os_metadata_in_the_plugin_tree_is_not_owner_content_and_goes_with_it(
+    tmp_path: Path,
+) -> None:
+    """ADR-023 §9: OS-written metadata neither changes the status nor blocks replace or remove.
+
+    A replace of the exact tree has nothing to rewrite and leaves it in place; remove takes it.
+    """
+
+    target, artifact, plugin = _install_portable(tmp_path)
+    exact = status_cursor_plugin(target, artifact)
+    for litter, data in _OS_METADATA_FILES.items():
+        (plugin / litter).write_bytes(data)
+
+    status = status_cursor_plugin(target, artifact)
+    assert status.state is exact.state is PluginArtifactState.PORTABLE_EXACT
+    assert status.installed_digest == exact.installed_digest
+
+    replace = preview_cursor_plugin(
+        request_id("req_10000000-0000-4000-8000-000000000071"),
+        target,
+        PluginArtifactAction.REPLACE,
+        artifact,
+    )
+    apply_cursor_plugin(
+        replace.request_id,
+        target,
+        PluginArtifactAction.REPLACE,
+        artifact,
+        accepted_preview_digest=replace.preview_digest,
+        authority=_authority(replace.preview_digest),
+        review=_AcceptingReview(),
+    )
+    assert status_cursor_plugin(target, artifact).state is PluginArtifactState.PORTABLE_EXACT
+
+    remove = preview_cursor_plugin(
+        request_id("req_10000000-0000-4000-8000-000000000072"),
+        target,
+        PluginArtifactAction.REMOVE,
+        artifact,
+    )
+    remove_cursor_plugin(
+        remove.request_id,
+        target,
+        artifact,
+        accepted_preview_digest=remove.preview_digest,
+        authority=_authority(remove.preview_digest),
+        review=_AcceptingReview(),
+    )
+    assert not plugin.exists()
+
+
+def test_an_owner_file_beside_os_metadata_still_reads_modified(tmp_path: Path) -> None:
+    target, artifact, plugin = _install_portable(tmp_path)
+    for litter, data in _OS_METADATA_FILES.items():
+        (plugin / litter).write_bytes(data)
+    (plugin / "notes.md").write_bytes(b"mine\n")
+
+    assert status_cursor_plugin(target, artifact).state is PluginArtifactState.MODIFIED
+    with pytest.raises(CursorIntegrationError) as removal:
+        preview_cursor_plugin(_REQUEST, target, PluginArtifactAction.REMOVE, artifact)
+    assert removal.value.reason is PluginArtifactReason.REMOVE_REFUSED
+    assert (plugin / "notes.md").read_bytes() == b"mine\n"
+    assert all(
+        (plugin / litter).read_bytes() == data for litter, data in _OS_METADATA_FILES.items()
+    )
+
+
 def test_member_name_that_is_not_utf8_is_a_typed_unsafe_target(tmp_path: Path) -> None:
     target, artifact, plugin = _install_portable(tmp_path)
     try:

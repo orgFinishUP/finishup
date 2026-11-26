@@ -65,6 +65,14 @@ def _install(target: IntegrationTarget, *, codex_version: str | None = "0.148.0-
     install_plugin(target, allow_untested=True, codex_version=codex_version)
 
 
+# Files macOS writes into a folder on its own (Finder's ``.DS_Store``, AppleDouble ``._`` files).
+_OS_METADATA_FILES = {
+    ".DS_Store": b"\x00\x00\x00\x01Bud1",
+    "skills/finishup/.DS_Store": b"\x00\x00\x00\x01Bud1",
+    "skills/finishup/._SKILL.md": b"\x00\x05\x16\x07\x00\x02\x00\x00",
+}
+
+
 class _FakeCodex:
     def __init__(
         self,
@@ -608,6 +616,91 @@ def test_modified_or_foreign_cache_stays_destination_conflict(tmp_path: Path) ->
     assert caught.value.reason is IntegrationReason.DESTINATION_CONFLICT
 
 
+def test_os_metadata_in_the_cache_never_blocks_its_refresh_or_removal(tmp_path: Path) -> None:
+    """Finder or AppleDouble files in the cache are not owner content (ADR-023 §9).
+
+    The cache with them is not exact, so setup refreshes it, and the refresh and the removal
+    both delete them with the managed files.
+    """
+
+    target, _project, home = _target(tmp_path)
+    _install(target, codex_version=None)
+    runner = _FakeCodex(target, home, codex_version="0.148.0-alpha.6")
+    first = _preview_activation(
+        target, executable_path=str(runner.executable), codex_home=home, _run=runner
+    )
+    _apply_activation(
+        target,
+        executable_path=str(runner.executable),
+        codex_home=home,
+        approved_digest=first.preview_digest,
+        _run=runner,
+    )
+    cache = home / f"plugins/cache/finishup/finishup/{__version__}"
+    for litter, data in _OS_METADATA_FILES.items():
+        (cache / litter).write_bytes(data)
+
+    preview = _preview_activation(
+        target, executable_path=str(runner.executable), codex_home=home, _run=runner
+    )
+    assert preview.cache_mutation_planned is True
+    result = _apply_activation(
+        target,
+        executable_path=str(runner.executable),
+        codex_home=home,
+        approved_digest=preview.preview_digest,
+        _run=runner,
+    )
+
+    assert result.state is ActivationState.ACTIVE
+    assert not any((cache / litter).exists() for litter in _OS_METADATA_FILES)
+
+    for litter, data in _OS_METADATA_FILES.items():
+        (cache / litter).write_bytes(data)
+    removal = _preview_removal(
+        target, executable_path=str(runner.executable), codex_home=home, _run=runner
+    )
+    assert removal.outcome is RemovalOutcome.REMOVE
+    removed = _apply_removal(
+        target,
+        executable_path=str(runner.executable),
+        approved_digest=removal.preview_digest,
+        codex_home=home,
+        _run=runner,
+    )
+    assert removed.outcome is RemovalOutcome.REMOVE
+    assert not cache.exists()
+
+
+def test_an_owner_file_beside_os_metadata_in_the_cache_stays_a_conflict(tmp_path: Path) -> None:
+    target, _project, home = _target(tmp_path)
+    _install(target, codex_version=None)
+    runner = _FakeCodex(target, home, codex_version="0.148.0-alpha.6")
+    first = _preview_activation(
+        target, executable_path=str(runner.executable), codex_home=home, _run=runner
+    )
+    _apply_activation(
+        target,
+        executable_path=str(runner.executable),
+        codex_home=home,
+        approved_digest=first.preview_digest,
+        _run=runner,
+    )
+    cache = home / f"plugins/cache/finishup/finishup/{__version__}"
+    for litter, data in _OS_METADATA_FILES.items():
+        (cache / litter).write_bytes(data)
+    (cache / "notes.md").write_bytes(b"owner notes\n")
+
+    with pytest.raises(IntegrationError) as caught:
+        _preview_activation(
+            target, executable_path=str(runner.executable), codex_home=home, _run=runner
+        )
+
+    assert caught.value.reason is IntegrationReason.DESTINATION_CONFLICT
+    assert (cache / "notes.md").read_bytes() == b"owner notes\n"
+    assert all((cache / litter).read_bytes() == data for litter, data in _OS_METADATA_FILES.items())
+
+
 def test_stale_managed_source_render_is_previewed_but_fenced_until_source_refresh(
     tmp_path: Path,
 ) -> None:
@@ -994,6 +1087,82 @@ def test_a_source_change_between_inspection_and_the_member_walk_keeps_its_cause(
 
     assert caught.value.reason is IntegrationReason.DESTINATION_CONFLICT
     assert caught.value.safe_details == details
+
+
+@pytest.mark.parametrize("tree", ["canonical_render", "host_render"])
+def test_os_metadata_in_the_plugin_source_does_not_block_activation(
+    tmp_path: Path, tree: str
+) -> None:
+    """Finder and AppleDouble files are not owner content (ADR-023 §9) and are never cached.
+
+    Both renders are covered: the host render is inspected as exact, and the committed
+    (canonical) render takes the prior-render path on an async-capable host.
+    """
+
+    target, project, home = _target(tmp_path)
+    _install(target, codex_version=None if tree == "canonical_render" else "0.148.0-alpha.6")
+    source = project / ".agents/plugins/finishup"
+    for litter, data in _OS_METADATA_FILES.items():
+        (source / litter).write_bytes(data)
+    runner = _FakeCodex(target, home)
+
+    preview = _preview_activation(
+        target, executable_path=str(runner.executable), codex_home=home, _run=runner
+    )
+    result = _apply_activation(
+        target,
+        executable_path=str(runner.executable),
+        codex_home=home,
+        approved_digest=preview.preview_digest,
+        _run=runner,
+    )
+
+    assert result.state is ActivationState.ACTIVE
+    cache = home / f"plugins/cache/finishup/finishup/{__version__}"
+    assert not any(path.name in {".DS_Store", "._SKILL.md"} for path in cache.rglob("*"))
+    assert inspect_activation(target, codex_home=home).state is ActivationState.ACTIVE
+
+
+def test_an_owner_file_beside_os_metadata_still_refuses_activation(tmp_path: Path) -> None:
+    target, project, home = _target(tmp_path)
+    _install(target)
+    source = project / ".agents/plugins/finishup"
+    for litter, data in _OS_METADATA_FILES.items():
+        (source / litter).write_bytes(data)
+    (source / "notes.md").write_bytes(b"owner notes\n")
+
+    with pytest.raises(IntegrationError) as caught:
+        preview_activation(target, codex_home=home)
+
+    assert caught.value.reason is IntegrationReason.DESTINATION_CONFLICT
+    assert caught.value.safe_details == {"unmanaged_files": True}
+
+
+def test_os_metadata_added_between_inspection_and_the_member_walk_is_ignored(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import finishup.adapters.integrations.codex_marketplace as marketplace
+    from finishup.adapters.integrations.codex_plugin import PluginInspection
+
+    target, project, _home = _target(tmp_path)
+    _install(target)
+    source = project / ".agents/plugins/finishup"
+
+    def inspect_then_change(
+        inspected: IntegrationTarget, *, codex_version: str | None = None
+    ) -> PluginInspection:
+        inspection = inspect_plugin(inspected, codex_version=codex_version)
+        for litter, data in _OS_METADATA_FILES.items():
+            (source / litter).write_bytes(data)
+        return inspection
+
+    monkeypatch.setattr(marketplace, "inspect_plugin", inspect_then_change)
+
+    members = marketplace._source_cache_members(  # pyright: ignore[reportPrivateUsage]
+        target, codex_version="0.148.0-alpha.6"
+    )
+
+    assert not set(members) & set(_OS_METADATA_FILES)
 
 
 def test_an_activated_source_with_an_owner_file_is_reported_and_can_still_be_removed(

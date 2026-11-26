@@ -25,6 +25,7 @@ from finishup.adapters.integrations.codex_skill import (
     load_packaged_skill_source,
     validated_managed_parent,
 )
+from finishup.adapters.integrations.os_metadata import is_os_metadata_file
 from finishup.config.foreign_write import project_root_admitted
 from finishup.config.home_project import allowed_home_project, home_project_allowed
 from finishup.domain.values import JsonValue as DomainJsonValue
@@ -501,7 +502,10 @@ def plugin_tree_matches_marker(members: Mapping[str, bytes]) -> bool:
     ADR-023 treats a marker-identified, internally consistent tree as a prior
     finishup-managed render that whole-directory replacement may refresh. Anything
     else — a foreign tree, a missing or inconsistent marker, or a modified
-    member — is not replaceable through this classification.
+    member — is not replaceable through this classification. Files the operating
+    system wrote on its own (``.DS_Store``, AppleDouble ``._`` files) are not owner
+    content and are not judged: Codex copies them from the project source into its
+    cache, and replacing the tree removes them with it.
     """
 
     marker_raw = members.get(_MARKER_NAME)
@@ -536,7 +540,9 @@ def plugin_tree_matches_marker(members: Mapping[str, bytes]) -> bool:
             return False
         inventory[relative_path] = (digest, size)
     actual = {
-        path: (_sha(data), len(data)) for path, data in members.items() if path != _MARKER_NAME
+        path: (_sha(data), len(data))
+        for path, data in members.items()
+        if path != _MARKER_NAME and not is_os_metadata_file(path)
     }
     return inventory == actual
 
@@ -545,7 +551,9 @@ def _tree_files(destination: Path) -> dict[str, Path] | None:
     """Every regular file in the tree by relative path, or None when it cannot be trusted.
 
     None means the tree itself is a symlink or not a directory, holds a symlink or a
-    non-regular member, or cannot be listed. Directories carry no content and are skipped.
+    non-regular member, or cannot be listed. Directories carry no content and are skipped,
+    and so are files the operating system wrote on its own (``.DS_Store``, AppleDouble
+    ``._`` files): they are not owner content and go with the tree when it is replaced.
     """
 
     if destination.is_symlink() or not destination.is_dir():
@@ -559,6 +567,8 @@ def _tree_files(destination: Path) -> dict[str, Path] | None:
                 continue
             if not candidate.is_file():
                 return None
+            if is_os_metadata_file(candidate.name):
+                continue
             files[candidate.relative_to(destination).as_posix()] = candidate
     except OSError:
         return None
@@ -698,8 +708,9 @@ def install_plugin(
         # The swap deletes the whole old directory, so every file in it must be FinishUP's:
         # this render's members and marker, or a prior render's own marker inventory.
         # Anything else is unmanaged content that is never removed (ADR-023 §9), and
-        # ``replace_modified`` covers edited managed files only. The refusal names no path,
-        # because an unmanaged file name is owner-controlled.
+        # ``replace_modified`` covers edited managed files only. OS-written metadata is not
+        # listed, so it never blocks the swap and goes with the old directory. The refusal
+        # names no path, because an unmanaged file name is owner-controlled.
         existing_files = _tree_files(destination)
         if existing_files is None:
             raise _error(IntegrationReason.TARGET_UNSAFE)
@@ -871,6 +882,7 @@ def inspect_plugin(
     }
     # Files FinishUP did not write make the tree not exact, and the digest binds them, so a
     # preview cannot be approved while hiding content that install would refuse to remove.
+    # OS-written metadata is neither: install removes it with the tree.
     existing_files = _tree_files(destination)
     if existing_files is None:
         exact = False
