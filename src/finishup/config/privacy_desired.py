@@ -6,11 +6,14 @@ Desired-state files declare nonsecret policy intent. Apply maps onto existing
 
 from __future__ import annotations
 
+import ctypes
 import errno
+import functools
 import os
 import stat
 import sys
 import tomllib
+from collections.abc import Callable
 from dataclasses import fields, is_dataclass
 from datetime import datetime
 from enum import Enum
@@ -62,6 +65,13 @@ _RENAME_UNAVAILABLE: Final = frozenset(
 # What `fsync` answers on a file system that cannot be told to flush. The flush did not fail;
 # there is none to ask for.
 _FLUSH_UNAVAILABLE: Final = frozenset({errno.EINVAL, errno.ENOSYS, errno.ENOTSUP})
+# Folders whose entries stand for a device or for a file a process already has open, such as
+# `/dev/fd/1`, which macOS resolves `/dev/stdout` to, or a Linux `/proc/<pid>/fd` entry a path
+# still names once resolved. Writing to such a name means writing into what it stands for: no
+# file can be made beside it, and a file renamed over it would not be the one the process holds.
+_DEVICES: Final = Path("/dev")
+_DESCRIPTOR_FOLDERS: Final = frozenset({_DEVICES, _DEVICES / "fd"})
+_PROCESSES: Final = Path("/proc")
 
 
 class PrivacyDesiredOutputUnwritable(Exception):
@@ -166,6 +176,11 @@ def _replace_whole(path: Path, data: bytes) -> bool:
         return False
     # Rename over the file a symlink names, never over the link.
     destination = Path(os.path.realpath(path))
+    if _stands_for_an_open_file(destination):
+        # macOS resolves `/dev/stdout` sent to a file to `/dev/fd/1`, which reports that file
+        # but where nothing can be made. Linux resolves it to the file's own name, which is
+        # renamed over as any other name is.
+        return False
     try:
         resolved = destination.lstat()
     except FileNotFoundError:
@@ -214,14 +229,27 @@ def _replace_whole(path: Path, data: bytes) -> bool:
     return True
 
 
+def _stands_for_an_open_file(destination: Path) -> bool:
+    """Whether the resolved *destination* names a device or a file a process already has open.
+
+    It does when it is an entry of `/dev`, `/dev/fd` or a process's `fd` folder under `/proc`.
+    Only the resolved name is checked: on Linux `/dev/stdout` sent to a file resolves to that
+    file's own name and is replaced like any other path.
+    """
+
+    folder = destination.parent
+    return folder in _DESCRIPTOR_FOLDERS or (folder.name == "fd" and _PROCESSES in folder.parents)
+
+
 def _made_like(descriptor: int, path: Path, existing: os.stat_result) -> bool:
     """Give the still-empty replacement the old file's owner, group and permissions.
 
-    Returns False when it may not have them, or when its extended attributes would still differ
-    from the old file's, so the old file is written in place and keeps what it has. The
-    attributes are compared, not copied: an access-control list is one of them, and under one
-    the group permission bits stand for the list's mask, so a file made with the same bits can
-    grant the owning group more than the old file did and drop the users the list named.
+    Returns False when it may not have them, or when what else the old file carries (its
+    extended attributes and access-control list, and on macOS its file flags) would differ on
+    the replacement or cannot be read here, so the old file is written in place and keeps what
+    it has. They are compared, not copied: under a Linux access-control list the group
+    permission bits stand for the list's mask, so a file made with the same bits can grant the
+    owning group more than the old file did and drop the users the list named.
     """
 
     try:
@@ -230,9 +258,26 @@ def _made_like(descriptor: int, path: Path, existing: os.stat_result) -> bool:
             os.fchown(descriptor, existing.st_uid, existing.st_gid)
         os.fchmod(descriptor, stat.S_IMODE(existing.st_mode))
         # Compared last: changing the permission bits rewrites an access-control list's mask.
-        return _extended_attributes(path) == _extended_attributes(descriptor)
+        carried = _carried(path)
+        return carried is not None and carried == _carried(descriptor)
     except OSError:
         return False
+
+
+def _carried(file: Path | int) -> object | None:
+    """What *file* carries besides its bytes, owner, group and permission bits, or None.
+
+    Two files that answer alike carry the same. None means this platform cannot tell: Python
+    reads extended attributes only on Linux, macOS is read through its C library, and nothing
+    else is read at all.
+    """
+
+    if sys.platform == "linux":
+        return _extended_attributes(file)
+    if sys.platform == "darwin":
+        security = _darwin_security()
+        return None if security is None else security.read(file)
+    return None
 
 
 def _extended_attributes(file: Path | int) -> dict[str, bytes]:
@@ -240,7 +285,7 @@ def _extended_attributes(file: Path | int) -> dict[str, bytes]:
 
     On Linux these hold a file's access-control list (also the one its folder gave it when it
     was made), its security label and anything a program attached to it. Python reads them only
-    on Linux, so elsewhere a file looks as if it had none.
+    on Linux; `_DarwinSecurity` reads macOS's.
     """
 
     if sys.platform != "linux":
@@ -252,6 +297,142 @@ def _extended_attributes(file: Path | int) -> dict[str, bytes]:
             return {}
         raise
     return {name: os.getxattr(file, name) for name in names}
+
+
+# <sys/acl.h>: the one kind of access-control list macOS keeps.
+_ACL_TYPE_EXTENDED: Final = 0x00000100
+# What the reads below answer for a file that has no list, or a file system that keeps none.
+_NONE_KEPT: Final = frozenset({errno.ENOENT, errno.ENOTSUP})
+type _Buffer = ctypes.Array[ctypes.c_char]
+
+
+def _file_flags(file: Path | int) -> int:
+    """The flags `chflags` sets on *file*, such as `hidden`; there are none off macOS."""
+
+    if sys.platform != "darwin":
+        return 0
+    return os.stat(file).st_flags
+
+
+def _last_error() -> OSError:
+    code = ctypes.get_errno()
+    return OSError(code, os.strerror(code))
+
+
+class _DarwinSecurity:
+    """The C library calls that read a macOS file's extended attributes and access-control list.
+
+    Python offers neither on macOS. Each call follows a symlink, as opening the path does, and
+    the list is not among the attributes `listxattr` names there, so both are read.
+    """
+
+    def __init__(self) -> None:
+        library = ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)
+        text, size, pointer = ctypes.c_char_p, ctypes.c_size_t, ctypes.c_void_p
+        self._list_path = library.listxattr
+        self._list_path.argtypes = [text, text, size, ctypes.c_int]
+        self._list_path.restype = ctypes.c_ssize_t
+        self._list_open = library.flistxattr
+        self._list_open.argtypes = [ctypes.c_int, text, size, ctypes.c_int]
+        self._list_open.restype = ctypes.c_ssize_t
+        self._get_path = library.getxattr
+        self._get_path.argtypes = [text, text, pointer, size, ctypes.c_uint32, ctypes.c_int]
+        self._get_path.restype = ctypes.c_ssize_t
+        self._get_open = library.fgetxattr
+        self._get_open.argtypes = [ctypes.c_int, text, pointer, size, ctypes.c_uint32, ctypes.c_int]
+        self._get_open.restype = ctypes.c_ssize_t
+        self._list_of_path = library.acl_get_file
+        self._list_of_path.argtypes = [text, ctypes.c_int]
+        self._list_of_path.restype = pointer
+        self._list_of_open = library.acl_get_fd_np
+        self._list_of_open.argtypes = [ctypes.c_int, ctypes.c_int]
+        self._list_of_open.restype = pointer
+        self._list_text = library.acl_to_text
+        self._list_text.argtypes = [pointer, pointer]
+        self._list_text.restype = pointer
+        self._free = library.acl_free
+        self._free.argtypes = [pointer]
+        self._free.restype = ctypes.c_int
+
+    def read(self, file: Path | int) -> tuple[int, dict[bytes, bytes], bytes | None]:
+        """*file*'s flags, its extended attributes by name, and its access-control list."""
+
+        if isinstance(file, int):
+            target: bytes | int = file
+        else:
+            target = os.fsencode(file)
+        return _file_flags(file), self._attributes(target), self._access_list(target)
+
+    def _attributes(self, file: bytes | int) -> dict[bytes, bytes]:
+        def names(buffer: _Buffer | None, size: int) -> int:
+            if isinstance(file, int):
+                return self._list_open(file, buffer, size, 0)
+            return self._list_path(file, buffer, size, 0)
+
+        try:
+            listed = _read_sized(names)
+        except OSError as error:
+            if error.errno == errno.ENOTSUP:  # this file system keeps none
+                return {}
+            raise
+        return {name: self._attribute(file, name) for name in listed.split(b"\0") if name}
+
+    def _attribute(self, file: bytes | int, name: bytes) -> bytes:
+        def value(buffer: _Buffer | None, size: int) -> int:
+            if isinstance(file, int):
+                return self._get_open(file, name, buffer, size, 0, 0)
+            return self._get_path(file, name, buffer, size, 0, 0)
+
+        return _read_sized(value)
+
+    def _access_list(self, file: bytes | int) -> bytes | None:
+        if isinstance(file, int):
+            found = self._list_of_open(file, _ACL_TYPE_EXTENDED)
+        else:
+            found = self._list_of_path(file, _ACL_TYPE_EXTENDED)
+        if not found:
+            error = _last_error()
+            if error.errno in _NONE_KEPT:
+                return None
+            raise error
+        try:
+            text = self._list_text(found, None)
+            if not text:
+                raise _last_error()
+            try:
+                return ctypes.string_at(text)
+            finally:
+                self._free(text)
+        finally:
+            self._free(found)
+
+
+def _read_sized(read: Callable[[_Buffer | None, int], int]) -> bytes:
+    """Ask *read* for the size, then for the bytes, as the extended-attribute calls want.
+
+    A size that grew in between fails with ERANGE, which leaves the file to be written in place.
+    """
+
+    size = read(None, 0)
+    if size < 0:
+        raise _last_error()
+    if size == 0:
+        return b""
+    buffer = ctypes.create_string_buffer(size)
+    filled = read(buffer, size)
+    if filled < 0:
+        raise _last_error()
+    return buffer.raw[:filled]
+
+
+@functools.cache
+def _darwin_security() -> _DarwinSecurity | None:
+    """The macOS reader, or None where the C library lacks one of its calls."""
+
+    try:
+        return _DarwinSecurity()
+    except (OSError, AttributeError):
+        return None
 
 
 def _write_in_place(path: Path, data: bytes) -> None:
@@ -279,10 +460,13 @@ def write_privacy_desired_toml(policy: PrivacyPolicy, path: Path) -> Path:
     permissions, and a new file gets the process's default mode.
 
     Where a rename cannot leave that, the bytes are written in place instead: into a device or
-    pipe, a file that has another hard link, a file whose owner a new file may not be given, a
-    file whose access-control list or other extended attributes a new file there would not have
-    (Linux only; they cannot be read elsewhere, so there a replaced file loses them), and a
-    file whose folder does not allow the rename. Only such a write can stop part-way.
+    pipe, a path that resolves to a name in `/dev`, `/dev/fd` or `/proc/<pid>/fd` (such as
+    `/dev/stdout` on macOS, which resolves to `/dev/fd/1`), a file that has another hard link,
+    a file whose owner a new file may not be given, a file whose access-control list, other
+    extended attributes or (on macOS) file flags such as `hidden` a new file there would not
+    have, and a file whose folder does not allow the rename. Linux and macOS are read for those;
+    on any other platform, or where they cannot be read, an existing file is written in place so
+    it keeps them. Only such a write can stop part-way.
 
     A path that cannot be written (an existing directory, a parent that is a file, a file that
     may not be written, a forbidden or read-only parent with no writable file at the path)

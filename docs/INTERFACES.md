@@ -10931,12 +10931,18 @@ facade and are never MCP tools.
   resolves to, keeping the old file's owner, group and permissions (a new file gets the default
   mode). The temporary file is flushed to storage first, except on a file system that cannot be
   told to flush. It writes in place where a rename cannot leave what a plain write leaves: a
-  device or pipe, a file with another hard link, a file whose owner a new file cannot be given, a
-  file whose extended attributes (its access-control list, security label and `user.*`
-  attributes) cannot be read or are not exactly those of the temporary file made beside it, and
-  a file whose folder does not allow the rename. Extended attributes are compared on Linux only.
-  Known gap: on macOS Python can read neither them nor an access-control list, so a file replaced
-  there loses both. A path that cannot be written, a read-only file included, fails as
+  device or pipe; a path whose resolved name is an entry of `/dev`, `/dev/fd` or `/proc/<pid>/fd`
+  (on macOS `/dev/stdout` sent to a file resolves to `/dev/fd/1`, where nothing can be created;
+  Linux resolves it to the file's own name, which is replaced like any other); a file with another
+  hard link; a file whose owner a new file cannot be given; a file whose extended attributes (on
+  Linux its access-control list, security label and `user.*` attributes; on macOS its extended
+  attributes read through libSystem, its access-control list and its `st_flags` file flags) cannot
+  be read or are not exactly those of the temporary file made beside it; and a file whose folder
+  does not allow the rename. On any other platform they cannot be read, so an existing file is
+  always written in place there (a new file is still renamed into place). The CLI prints its
+  result line to stdout after the export, so `--output /dev/stdout > file` is not a way to save
+  it: on macOS the line follows the TOML in the file, which then does not load, and on Linux it
+  reaches the unnamed old file. A path that cannot be written, a read-only file included, fails as
   `privacy_desired_output_unwritable` with nothing saved; an in-place write that stops after it
   began fails as `privacy_desired_output_incomplete`. Both are CLI-only and exit 2, and neither
   carries the path or the operating-system message.
