@@ -6,6 +6,8 @@ import asyncio
 import os
 import subprocess
 import sys
+import unicodedata
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -627,6 +629,270 @@ def test_the_rule_source_query_sends_the_path_git_composes_from_its_arguments(
     assert any("core.precomposeUnicode" in arguments for arguments, _ in calls) is macos
 
 
+# The spelling the rule query is sent on macOS when Git composes argument paths there.
+_precomposed: Callable[[bytes], bytes] = getattr(capture_module, "_precomposed")
+
+# Git for macOS composes an argument path with iconv's ``UTF-8-MAC`` decoder, which joins only a
+# canonical pair (Unicode 3.2, Basic Multilingual Plane) and the Hangul syllables. NFC does more:
+# it maps singletons and decomposes composition exclusions. Git keeps each of these as written.
+_KEPT_AS_WRITTEN = {
+    "kelvin sign, NFC K": "\u212a",
+    "greek question mark, NFC semicolon": "\u037e",
+    "ohm sign, NFC omega": "\u2126",
+    "angstrom sign, NFC A with ring": "\u212b",
+    "CJK compatibility ideograph, NFC U+8C48": "\uf900",
+    "composition exclusion, NFC decomposes it": "\u0958",
+    "Hebrew presentation form, NFC decomposes it": "\ufb1d",
+    "singleton combining mark, NFC U+0300": "\u0340",
+    "non-starter decomposition, NFC U+0308 U+0301": "\u0344",
+    "singleton mark after a base, NFC U+00E0": "a\u0340",
+    "excluded pair stays decomposed": "\u0915\u093c",
+    "singleton before a mark, NFC U+01FA": "\u212b\u0301",
+    "pair added after Unicode 3.2, NFC U+1B06": "\u1b05\u1b35",
+}
+
+# Decomposed spellings Git for macOS composes, left to right, each character joined to the one
+# before it only: marks out of canonical order, or blocked, stay as they are.
+_COMPOSED_BY_GIT = {
+    "latin e and acute": ("cafe\u0301", "caf\u00e9"),
+    "two marks in canonical order": ("a\u0323\u0302", "\u1ead"),
+    "two marks in the other order, NFC U+1EAD": ("a\u0302\u0323", "\u00e2\u0323"),
+    "a second acute is blocked": ("e\u0301\u0301", "\u00e9\u0301"),
+    "hangul syllables with and without a final": (
+        "\u1112\u1161\u11ab\u1100\u1173\u11af\u1100\u1161",
+        "\ud55c\uae00\uac00",
+    ),
+    "kana and voiced sound mark": ("\u304b\u3099", "\u304c"),
+    "devanagari pair outside the exclusions": ("\u0928\u093c", "\u0929"),
+    "a kept character beside a composed one": ("\u212acafe\u0301", "\u212acaf\u00e9"),
+}
+
+
+@pytest.mark.parametrize("written", _KEPT_AS_WRITTEN.values(), ids=_KEPT_AS_WRITTEN)
+def test_precomposition_keeps_what_git_for_macos_keeps(written: str) -> None:
+    assert _precomposed(f"{written}/x".encode()) == f"{written}/x".encode()
+
+
+@pytest.mark.parametrize(("written", "composed"), _COMPOSED_BY_GIT.values(), ids=_COMPOSED_BY_GIT)
+def test_precomposition_composes_what_git_for_macos_composes(written: str, composed: str) -> None:
+    assert _precomposed(f"{written}/x".encode()) == f"{composed}/x".encode()
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        b"plain/ascii.txt",
+        "cafe\u0301/\U0001f600".encode(),
+        "cafe\u0301/\uffff".encode(),
+        "cafe\u0301/\ufffe".encode(),
+        "cafe\u0301/".encode() + b"\xff",
+    ],
+    ids=["ascii", "beyond the basic plane", "U+FFFF", "U+FFFE", "not UTF-8"],
+)
+def test_a_path_git_for_macos_cannot_convert_is_sent_as_written(raw: bytes) -> None:
+    """Apple's ``UTF-8-MAC`` decoder refuses these, and Git then keeps the whole path as is."""
+
+    assert _precomposed(raw) == raw
+
+
+def _canonical_pairs(database: Any) -> dict[str, str]:
+    """Every Basic Multilingual Plane primary composite of ``database`` but the Hangul syllables
+    (composed by arithmetic, not a table), keyed by its canonical pair."""
+
+    pairs: dict[str, str] = {}
+    for code in range(0x10000):
+        if 0xD800 <= code < 0xE000 or 0xAC00 <= code <= 0xD7A3:
+            continue
+        fields = database.decomposition(chr(code)).split()
+        if len(fields) != 2 or fields[0].startswith("<"):
+            continue
+        pair = "".join(chr(int(field, 16)) for field in fields)
+        if database.normalize("NFC", pair) == chr(code):
+            pairs[pair] = chr(code)
+    return pairs
+
+
+def test_precomposition_joins_exactly_the_pairs_of_apples_table() -> None:
+    """Apple's ``UTF-8-MAC`` composition table holds 917 pairs: Unicode 3.2's, in the BMP.
+
+    A pair Unicode defined later in the plane (Balinese, 5.0) is missing from that table, so Git
+    for macOS leaves it decomposed though NFC composes it.
+    """
+
+    unicode_3_2 = _canonical_pairs(unicodedata.ucd_3_2_0)
+    later = {
+        pair: composite
+        for pair, composite in _canonical_pairs(unicodedata).items()
+        if pair not in unicode_3_2
+    }
+
+    assert len(unicode_3_2) == 917
+    assert "\u1b05\u1b35" in later
+    assert all(
+        _precomposed(pair.encode()) == composite.encode() for pair, composite in unicode_3_2.items()
+    )
+    assert all(_precomposed(pair.encode()) == pair.encode() for pair in later)
+
+
+def test_precomposition_joins_every_hangul_syllable_as_unicode_defines_it() -> None:
+    leading = [chr(code) for code in range(0x1100, 0x1113)]
+    vowels = [chr(code) for code in range(0x1161, 0x1176)]
+    trailing = [chr(code) for code in range(0x11A8, 0x11C3)]
+    sequences = [first + vowel for first in leading for vowel in vowels]
+    sequences += [
+        unicodedata.normalize("NFC", pair) + last for pair in sequences for last in trailing
+    ]
+
+    assert all(
+        _precomposed(sequence.encode()) == unicodedata.normalize("NFC", sequence).encode()
+        for sequence in sequences
+    )
+    assert len({unicodedata.normalize("NFC", sequence) for sequence in sequences}) == 11_172
+
+
+def _record_git_calls(
+    monkeypatch: pytest.MonkeyPatch, *, failing: str | None = None
+) -> list[tuple[tuple[str, ...], bytes | None]]:
+    calls: list[tuple[tuple[str, ...], bytes | None]] = []
+    real = capture_module.run_read_only_git
+
+    def run(*args: Any, **kwargs: Any) -> tuple[int, bytes]:
+        arguments = tuple(args[1])
+        calls.append((arguments, kwargs.get("stdin_bytes")))
+        if failing is not None and failing in arguments:
+            raise ValueError("git_failed")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(capture_module, "run_read_only_git", run)
+    return calls
+
+
+def test_the_rule_source_query_keeps_a_character_nfc_would_rewrite(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reviewer regression: NFC sends U+212A KELVIN SIGN as ``K`` and misses its rule.
+
+    Git for macOS composes only the decomposed ``e`` + U+0301 of this path, so the rule query is
+    sent exactly that spelling (the sign as written) and names the ``.gitignore`` rule spelled
+    with the sign, as the argument query that proved the path ignored matched it.
+    """
+
+    repository = _repository(tmp_path)
+    _set_precompose_unicode(repository, "true")
+    (repository / ".gitignore").write_text("checkpoints/\n\u212a*/\n", encoding="utf-8")
+    folder = repository / f"\u212a{_DECOMPOSED}"
+    folder.mkdir()
+    (folder / "x").write_text("x\n", encoding="utf-8")
+    monkeypatch.setattr(capture_module, "_git_precomposes_arguments", lambda: True)
+    calls = _record_git_calls(monkeypatch)
+
+    (probe,) = GitChangeCaptureAdapter().probe_requested_paths(
+        os.fspath(repository), (f"\u212a{_DECOMPOSED}/x",)
+    )
+
+    assert (probe.ignored, probe.ignore_source, probe.ignore_file) == (
+        True,
+        "repository_file",
+        ".gitignore",
+    )
+    assert [stdin for arguments, stdin in calls if "--stdin" in arguments] == [
+        f"\u212a{_COMPOSED}/x".encode() + b"\0"
+    ]
+
+
+@pytest.mark.parametrize("written", _KEPT_AS_WRITTEN.values(), ids=_KEPT_AS_WRITTEN)
+def test_a_path_git_composes_no_further_is_sent_as_written_without_a_config_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, written: str
+) -> None:
+    """Nothing in these paths composes, so the setting is not read and the rule still matches."""
+
+    repository = _repository(tmp_path)
+    _set_precompose_unicode(repository, "true")
+    (repository / ".gitignore").write_text(f"checkpoints/\n{written}/\n", encoding="utf-8")
+    folder = repository / written
+    folder.mkdir()
+    (folder / "x").write_text("x\n", encoding="utf-8")
+    monkeypatch.setattr(capture_module, "_git_precomposes_arguments", lambda: True)
+    calls = _record_git_calls(monkeypatch)
+
+    (probe,) = GitChangeCaptureAdapter().probe_requested_paths(
+        os.fspath(repository), (f"{written}/x",)
+    )
+
+    assert (probe.ignored, probe.ignore_source, probe.ignore_file) == (
+        True,
+        "repository_file",
+        ".gitignore",
+    )
+    assert [stdin for arguments, stdin in calls if "--stdin" in arguments] == [
+        f"{written}/x".encode() + b"\0"
+    ]
+    assert not any("core.precomposeUnicode" in arguments for arguments, _ in calls)
+
+
+def test_a_failed_precompose_setting_read_is_made_once_and_counts_as_unset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A setting that cannot be read is not retried per path; each path then goes as written."""
+
+    repository = _repository(tmp_path)
+    _set_precompose_unicode(repository, "true")
+    (repository / ".gitignore").write_text("checkpoints/\ncaf*/\n", encoding="utf-8")
+    written = (_DECOMPOSED, "cafe\u0300")
+    for name in written:
+        folder = repository / name
+        folder.mkdir()
+        (folder / "x").write_text("x\n", encoding="utf-8")
+    monkeypatch.setattr(capture_module, "_git_precomposes_arguments", lambda: True)
+    calls = _record_git_calls(monkeypatch, failing="core.precomposeUnicode")
+
+    probes = GitChangeCaptureAdapter().probe_requested_paths(
+        os.fspath(repository), tuple(f"{name}/x" for name in written)
+    )
+
+    assert [(probe.ignored, probe.ignore_source, probe.ignore_file) for probe in probes] == [
+        (True, "repository_file", ".gitignore"),
+        (True, "repository_file", ".gitignore"),
+    ]
+    assert sum("core.precomposeUnicode" in arguments for arguments, _ in calls) == 1
+    assert sorted(stdin or b"" for arguments, stdin in calls if "--stdin" in arguments) == sorted(
+        f"{name}/x".encode() + b"\0" for name in written
+    )
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="only Git for macOS composes argument paths")
+@pytest.mark.parametrize("kept", ["\uf900", "\u212b"], ids=["U+F900", "U+212B"])
+def test_macos_names_the_rule_file_for_a_character_nfc_would_rewrite(
+    tmp_path: Path, kept: str
+) -> None:
+    """Real macOS Git: a character its precomposition keeps is sent as written, beside a composed
+    ``e`` + U+0301, so the ``.gitignore`` rule spelled the same way is named.
+
+    NFC would have sent U+F900 as U+8C48 (U+212B as U+00C5), a spelling no rule matches, and the
+    path would have read as ignored by a rule outside the repository.
+    """
+
+    repository = _repository(tmp_path)
+    _set_precompose_unicode(repository, "true")
+    (repository / ".gitignore").write_text(
+        f"checkpoints/\n{kept}{_COMPOSED}/\n{kept}/\n", encoding="utf-8"
+    )
+    for name in (f"{kept}{_DECOMPOSED}", kept):
+        folder = repository / name
+        folder.mkdir()
+        (folder / "x").write_text("x\n", encoding="utf-8")
+
+    probes = GitChangeCaptureAdapter().probe_requested_paths(
+        os.fspath(repository), (f"{kept}{_DECOMPOSED}/x", f"{kept}{_COMPOSED}/x", f"{kept}/x")
+    )
+
+    assert [(probe.ignored, probe.ignore_source, probe.ignore_file) for probe in probes] == [
+        (True, "repository_file", ".gitignore"),
+        (True, "repository_file", ".gitignore"),
+        (True, "repository_file", ".gitignore"),
+    ]
+
+
 @pytest.mark.skipif(sys.platform != "darwin", reason="only Git for macOS composes argument paths")
 def test_macos_names_the_rule_file_for_a_decomposed_path(tmp_path: Path) -> None:
     """Real macOS Git: a decomposed spelling of a folder a composed rule ignores names that rule.
@@ -649,4 +915,39 @@ def test_macos_names_the_rule_file_for_a_decomposed_path(tmp_path: Path) -> None
     assert [(probe.ignored, probe.ignore_source, probe.ignore_file) for probe in probes] == [
         (True, "repository_file", ".gitignore"),
         (True, "repository_file", ".gitignore"),
+    ]
+
+
+def test_a_composed_spelling_that_names_no_rule_is_asked_once_more_as_written(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A Git whose composition differs from the modelled decoder still gets its rule named.
+
+    Here the rule is spelled decomposed, so only the path as written matches it. On Linux the
+    quiet argument query (never composed) proves the path ignored; with composition modelled on,
+    the composed rule query names nothing, and the path is asked once more as written instead of
+    reading as outside the repository. Composition that matches costs no second query.
+    """
+
+    repository = _repository(tmp_path)
+    _set_precompose_unicode(repository, "true")
+    (repository / ".gitignore").write_text(f"checkpoints/\n{_DECOMPOSED}/\n", encoding="utf-8")
+    folder = repository / _DECOMPOSED
+    folder.mkdir()
+    (folder / "x").write_text("x\n", encoding="utf-8")
+    monkeypatch.setattr(capture_module, "_git_precomposes_arguments", lambda: True)
+    calls = _record_git_calls(monkeypatch)
+
+    (probe,) = GitChangeCaptureAdapter().probe_requested_paths(
+        os.fspath(repository), (f"{_DECOMPOSED}/x",)
+    )
+
+    assert (probe.ignored, probe.ignore_source, probe.ignore_file) == (
+        True,
+        "repository_file",
+        ".gitignore",
+    )
+    assert [stdin for arguments, stdin in calls if "--stdin" in arguments] == [
+        f"{_COMPOSED}/x".encode() + b"\0",
+        f"{_DECOMPOSED}/x".encode() + b"\0",
     ]
