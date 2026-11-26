@@ -374,6 +374,10 @@ pristine upgrades. Connect preserves them. Move the affected `.agents/skills/fin
 outside `.agents/skills` to keep your changes, then rerun the connection for the same project and
 Codex home. A rerun with the conflicting directory still in place refuses again. An approved
 disconnect can also remove an intact earlier skill without requiring an upgrade first.
+A `.DS_Store` that Finder wrote, or an AppleDouble `._<name>` file that macOS wrote on an exFAT,
+FAT, SMB or NFS volume, is not an extra file (ADR-023 §9 amendment): it changes no status,
+digest or preview, and an upgrade or disconnect removes it with the directory. A file with any
+other name, such as `.DS_Store.txt` or `notes._md`, is still an extra file.
 
 A fresh **policy** connection uses the plugin activation cache's pinned `.mcp.json` registration
 alone; it creates no direct `[mcp_servers.finishup]` table. A **strict** connection keeps a direct
@@ -758,8 +762,9 @@ activation preview skip them, a source install or refresh replaces the directory
 with it, and `plugin add` copying them into the Codex cache only makes setup refresh that cache.
 Only a regular file with exactly such a name counts: `.DS_Store.txt`, `notes._md` or a file
 inside a folder named `._notes` is still yours and still refused, and a link under such a name
-is still `target_unsafe`. The same rule applies to the portable, Claude Code and Cursor plugin
-trees, on every platform.
+is still `target_unsafe`. The same rule applies to the project skill at `.agents/skills/finishup`
+(and the earlier `.agents/skills/yoetz` that setup migrates) and to the portable, Claude Code and
+Cursor plugin trees, on every platform.
 
 Every setup route gives one continuation for it, naming the directory: move those files, or the
 whole directory, outside `.agents/plugins`, then rerun setup. Which reason carries it depends on
@@ -2489,7 +2494,7 @@ egress.
 | MCP, service or hooks stop with `release_runtime_group_writable` / `release_runtime_world_writable` | A runtime another account can write (ADR-007, 2026-10-14) stops `finishup mcp serve` with `release_runtime_group_writable` or `release_runtime_world_writable` and the exact `chmod -R go-w` repair on stderr (Codex shows it as the MCP server's startup error). Its hooks exit 20 with no stdout, so they make no allow or block decision (exit 2 is the only blocking code); Codex continues the turn; their stderr names the token without local paths and points at `finishup service run`, which prints the repair. Group write through the user's own private group (the Ubuntu/Fedora umask 0002 default) is accepted. |
 | Resource invalid | Reinstall from a verified package artifact. |
 | Preview stale | Run `status`, then a fresh preview. |
-| Modified/partial content | Preserve and review manually; use `replace_modified` deliberately if desired. |
+| Modified/partial content | Preserve and review manually; use `replace_modified` deliberately if desired. A `.DS_Store` or AppleDouble `._` file macOS wrote on its own makes nothing modified. |
 | Compatibility is `unsupported` | Automatic activation is unprofiled; use a supported FinishUP/Codex version pair when capability evidence is required. Session-stream parsing is separate: a newer Codex release is still admitted structurally, and `observe reconcile` reports `admission: partially_understood` with the affected `admission_reasons` rather than `unsupported_format` (issue #656). |
 | Write/swap interrupted | Run `status`; preserve any staged content; do not delete it yourself. |
 | Skill not discovered, or duplicate `$finishup` names loaded | Check the exact scope, loaded skill roots, managed path, trust, version, and capability matrix; reload Codex. |

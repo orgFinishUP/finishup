@@ -6,12 +6,13 @@ attributes in an AppleDouble sibling named ``._<name>``. Neither is content anyo
 in a FinishUP-managed tree, and neither is visible in Finder, so a refusal that asks the owner to
 move them out cannot be followed.
 
-The managed-tree readers of every host (the Codex plugin source, the portable plugin tree, and the
-Claude Code and Cursor plugin trees) skip such a file: it never counts as a file FinishUP did not
-write, never enters an inspection or preview digest, and never blocks an install, refresh or
-removal. It goes with the tree when FinishUP replaces or removes that tree as a whole (ADR-023
-§9). Only a regular file is judged by name; a link or any other non-regular member under such a
-name stays unsafe, and a file inside a folder named ``._x`` is still owner content.
+The managed-tree readers of every host (the Codex plugin source, the Codex project skill and the
+Yoetz-era skill tree it migrates, the portable plugin tree, and the Claude Code and Cursor plugin
+trees) skip such a file: it never counts as a file FinishUP did not write, never enters an
+inspection or preview digest, and never blocks an install, refresh or removal. It goes with the
+tree when FinishUP replaces or removes that tree as a whole (ADR-023 §9). Only a regular file is
+judged by name; a link or any other non-regular member under such a name stays unsafe, and a file
+inside a folder named ``._x`` is still owner content.
 """
 
 from __future__ import annotations

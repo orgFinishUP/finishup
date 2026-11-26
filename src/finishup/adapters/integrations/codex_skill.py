@@ -12,6 +12,7 @@ from importlib import resources
 from pathlib import Path
 from typing import Final, Literal, Protocol, cast
 
+from finishup.adapters.integrations.os_metadata import is_os_metadata_file
 from finishup.config.foreign_write import project_root_admitted, writable_by_others
 from finishup.config.home_project import home_project_allowed
 from finishup.domain.values import JsonObject
@@ -598,6 +599,18 @@ def _marker_consistent(members: Mapping[str, bytes]) -> bool:
     return inventory == actual
 
 
+def _os_metadata(path: Path, facts: os.stat_result) -> bool:
+    """True for a regular file the operating system wrote into a skill tree on its own.
+
+    Finder's ``.DS_Store`` and AppleDouble ``._`` files are not owner content (ADR-023 §9):
+    the tree readers skip them, so they never make a tree modified or not owned, never enter an
+    installed or legacy digest, and go with the tree when install or removal deletes it. A link
+    or any other non-regular member under such a name is still judged, and refused.
+    """
+
+    return stat.S_ISREG(facts.st_mode) and is_os_metadata_file(path.name)
+
+
 def _legacy_tree(parent: Path) -> tuple[LegacySkillTree, str | None]:
     """Classify the Yoetz-era skill tree beside FinishUP's without following links (ADR-048)."""
 
@@ -614,6 +627,8 @@ def _legacy_tree(parent: Path) -> tuple[LegacySkillTree, str | None]:
             if path.is_dir():
                 continue
             facts = path.lstat()
+            if _os_metadata(path, facts):
+                continue
             if (
                 not stat.S_ISREG(facts.st_mode)
                 or facts.st_nlink != 1
@@ -664,6 +679,8 @@ def inspect_destination(target: IntegrationTarget, source: SkillSource) -> Desti
             if path.is_dir():
                 continue
             facts = path.lstat()
+            if _os_metadata(path, facts):
+                continue
             if (
                 not stat.S_ISREG(facts.st_mode)
                 or facts.st_nlink != 1
@@ -930,7 +947,16 @@ def _remove_tree_fd(parent_fd: int, name: str, *, depth: int = 0) -> None:
         for child in os.listdir(directory_fd):
             if child in {"", ".", ".."} or "/" in child:
                 raise _error(IntegrationReason.TARGET_UNSAFE)
-            facts = os.stat(child, dir_fd=directory_fd, follow_symlinks=False)
+            try:
+                facts = os.stat(child, dir_fd=directory_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                # On a volume without native extended attributes (exFAT, FAT, NFS, an SMB share
+                # without streams) macOS removes a file's or folder's AppleDouble ``._<name>``
+                # companion with it, so one listed after its file is already gone. Any other
+                # member that vanishes mid-removal still fails the removal.
+                if is_os_metadata_file(child):
+                    continue
+                raise
             if stat.S_ISLNK(facts.st_mode):
                 os.unlink(child, dir_fd=directory_fd)
             elif stat.S_ISDIR(facts.st_mode):
